@@ -741,8 +741,8 @@ def generate_settings_files():
                     "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, and amortization period in years."
                 }
             },
-            # Capital expenses that can be amortized over time
-            "capital_expenses": [
+            # Capital expenses that can be amortized over time (property-level)
+            "property_capital_expenses": [
                 {
                     "id": "",
                     "description": "",
@@ -908,7 +908,7 @@ def generate_settings_files():
                     }
                 },
                 # Capital expenses that can be amortized over time
-                "capital_expenses": [
+                "property_capital_expenses": [
                     {
                         "id": "",
                         "description": "",

@@ -39,3 +39,4 @@ var/
 .Trashes
 ehthumbs.db
 Thumbs.db
+**/.claude/settings.local.json
