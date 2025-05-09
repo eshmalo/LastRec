@@ -421,7 +421,7 @@ def find_all_tenants_for_property(property_id: str) -> List[Tuple[str, str]]:
 
 
 def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
-    """Load and merge settings from portfolio, property, and tenant levels."""
+    """Load and merge settings from portfolio, property, and tenant levels with proper inheritance."""
     # Load portfolio settings (base level)
     portfolio_settings = load_portfolio_settings()
 
@@ -435,97 +435,124 @@ def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[st
     result["total_rsf"] = property_settings.get("total_rsf", 0)
     result["property_capital_expenses"] = property_settings.get("capital_expenses", [])
 
-    # Merge property settings into result
-    for key, value in property_settings.get("settings", {}).items():
-        if key in result["settings"]:
-            if isinstance(value, dict) and isinstance(result["settings"][key], dict):
-                # Special handling for gl_inclusions and gl_exclusions
-                if key in ["gl_inclusions", "gl_exclusions"]:
-                    # For inclusion/exclusion settings, we want to MERGE the values by category
-                    merged_dict = result["settings"][key].copy()
+    # Merge property settings into result - with improved handling of GL inclusions/exclusions
+    property_settings_dict = property_settings.get("settings", {})
 
-                    # Check if property settings object is empty for inclusions
-                    if key == "gl_inclusions" and not value:
-                        # If property has empty inclusions object, preserve portfolio settings
-                        logger.info(f"Property has empty {key}, preserving portfolio-level settings")
-                        pass  # Keep the merged_dict as is (with portfolio settings)
-                    else:
-                        # For each category in property settings
-                        for category, category_values in value.items():
-                            if category in merged_dict:
-                                # Different handling for inclusions vs exclusions
-                                if key == "gl_exclusions":
-                                    # For exclusions, we APPEND property-level exclusions to portfolio exclusions
-                                    if isinstance(category_values, list) and isinstance(merged_dict[category], list):
-                                        # Create a list of ALL exclusions from both levels
-                                        merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
-                                else:
-                                    # For inclusions, if property specifies something, it overrides
-                                    # ONLY if the category_values is not empty
-                                    if category_values:  # Only override if non-empty
-                                        merged_dict[category] = category_values
-                            else:
-                                # If category doesn't exist at all, add it
-                                merged_dict[category] = category_values
+    # Handle special cases for gl_inclusions and gl_exclusions
+    if "gl_inclusions" in property_settings_dict:
+        # Get portfolio and property inclusions
+        portfolio_inclusions = result["settings"].get("gl_inclusions", {})
+        property_inclusions = property_settings_dict.get("gl_inclusions", {})
 
-                    result["settings"][key] = merged_dict
-                else:
-                    # Deep merge for other dictionaries
-                    result["settings"][key] = deep_merge(result["settings"][key], value)
-            elif value is not None and value != "":
-                # Override with property value if not empty
-                result["settings"][key] = value
-        else:
-            # Add new key from property settings
-            result["settings"][key] = value
+        # Start with portfolio inclusions
+        merged_inclusions = {}
+        for category, values in portfolio_inclusions.items():
+            merged_inclusions[category] = values.copy() if isinstance(values, list) else values
 
-    # If tenant_id is provided, merge tenant settings
-    if tenant_id:
-        tenant_settings = load_tenant_settings(property_id, tenant_id)
+        # Only override with property inclusions if they exist AND have content
+        for category, values in property_inclusions.items():
+            # Check if property has actual values for this category (not empty list or dict)
+            if values and (isinstance(values, list) and len(values) > 0):
+                # Replace portfolio inclusions with property inclusions for this category
+                merged_inclusions[category] = values.copy()
+                logger.info(f"Property overrides portfolio inclusions for {category}")
+            elif category in property_inclusions and category in merged_inclusions:
+                # Property specifically includes this category, but with empty list
+                # Preserve it - empty property list would override portfolio settings
+                logger.info(f"Property has empty {category} inclusions, preserving portfolio settings")
 
-        # Merge tenant settings into result
-        for key, value in tenant_settings.get("settings", {}).items():
+        # Update the result
+        result["settings"]["gl_inclusions"] = merged_inclusions
+
+    # Handle exclusions separately - they are ADDITIVE across levels
+    if "gl_exclusions" in property_settings_dict:
+        # Get portfolio and property exclusions
+        portfolio_exclusions = result["settings"].get("gl_exclusions", {})
+        property_exclusions = property_settings_dict.get("gl_exclusions", {})
+
+        # Start with portfolio exclusions
+        merged_exclusions = {}
+        for category, values in portfolio_exclusions.items():
+            merged_exclusions[category] = values.copy() if isinstance(values, list) else values
+
+        # Add (not replace) property exclusions
+        for category, values in property_exclusions.items():
+            if category not in merged_exclusions:
+                # If category doesn't exist at portfolio level, add it with property values
+                merged_exclusions[category] = values.copy() if isinstance(values, list) else values
+            elif values and isinstance(values, list) and isinstance(merged_exclusions[category], list):
+                # Combine exclusions without duplicates
+                existing_exclusions = merged_exclusions[category]
+                new_exclusions = [val for val in values if val not in existing_exclusions]
+                merged_exclusions[category] = existing_exclusions + new_exclusions
+                logger.info(f"Added {len(new_exclusions)} property-level exclusions to {category}")
+
+        # Update the result
+        result["settings"]["gl_exclusions"] = merged_exclusions
+
+    # Merge other property settings
+    for key, value in property_settings_dict.items():
+        if key not in ["gl_inclusions", "gl_exclusions"]:  # We've already handled these
             if key in result["settings"]:
                 if isinstance(value, dict) and isinstance(result["settings"][key], dict):
-                    # Special handling for gl_inclusions and gl_exclusions
-                    if key in ["gl_inclusions", "gl_exclusions"]:
-                        # For inclusion/exclusion settings, we want to MERGE the values by category
-                        merged_dict = result["settings"][key].copy()
-
-                        # Check if tenant settings object is empty for inclusions
-                        if key == "gl_inclusions" and not value:
-                            # If tenant has empty inclusions object, preserve existing settings
-                            logger.info(f"Tenant has empty {key}, preserving higher-level settings")
-                            pass  # Keep the merged_dict as is (with portfolio/property settings)
-                        else:
-                            # For each category in tenant settings
-                            for category, category_values in value.items():
-                                if category in merged_dict:
-                                    # Different handling for inclusions vs exclusions
-                                    if key == "gl_exclusions":
-                                        # For exclusions, we APPEND tenant-level exclusions to existing exclusions
-                                        if isinstance(category_values, list) and isinstance(merged_dict[category], list):
-                                            # Create a list of ALL exclusions from both levels
-                                            merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
-                                    else:
-                                        # For inclusions, if tenant specifies something, it overrides
-                                        # ONLY if the category_values is not empty
-                                        if category_values:  # Only override if non-empty
-                                            merged_dict[category] = category_values
-                                else:
-                                    # If category doesn't exist at all, add it
-                                    merged_dict[category] = category_values
-
-                        result["settings"][key] = merged_dict
-                    else:
-                        # Deep merge for other dictionaries
-                        result["settings"][key] = deep_merge(result["settings"][key], value)
+                    # Deep merge for dictionaries
+                    result["settings"][key] = deep_merge(result["settings"][key], value)
                 elif value is not None and value != "":
-                    # Override with tenant value if not empty
+                    # Override with property value if not empty
                     result["settings"][key] = value
             else:
-                # Add new key from tenant settings
+                # Add new key from property settings
                 result["settings"][key] = value
+
+    # If tenant_id is provided, merge tenant settings with the same logic
+    if tenant_id:
+        tenant_settings = load_tenant_settings(property_id, tenant_id)
+        tenant_settings_dict = tenant_settings.get("settings", {})
+
+        # Apply the same logic for tenant GL inclusions/exclusions
+        if "gl_inclusions" in tenant_settings_dict:
+            # Get current inclusions and tenant inclusions
+            current_inclusions = result["settings"].get("gl_inclusions", {})
+            tenant_inclusions = tenant_settings_dict.get("gl_inclusions", {})
+
+            # Only override if tenant has actual values for a category
+            for category, values in tenant_inclusions.items():
+                if values and (isinstance(values, list) and len(values) > 0):
+                    # Replace with tenant inclusions for this category
+                    current_inclusions[category] = values.copy()
+                    logger.info(f"Tenant overrides inclusions for {category}")
+
+        # Handle tenant exclusions (additive)
+        if "gl_exclusions" in tenant_settings_dict:
+            # Get current exclusions and tenant exclusions
+            current_exclusions = result["settings"].get("gl_exclusions", {})
+            tenant_exclusions = tenant_settings_dict.get("gl_exclusions", {})
+
+            # Add tenant exclusions to existing exclusions
+            for category, values in tenant_exclusions.items():
+                if category not in current_exclusions:
+                    # If category doesn't exist, add it with tenant values
+                    current_exclusions[category] = values.copy() if isinstance(values, list) else values
+                elif values and isinstance(values, list) and isinstance(current_exclusions[category], list):
+                    # Add tenant exclusions without duplicates
+                    existing_exclusions = current_exclusions[category]
+                    new_exclusions = [val for val in values if val not in existing_exclusions]
+                    current_exclusions[category] = existing_exclusions + new_exclusions
+                    logger.info(f"Added {len(new_exclusions)} tenant-level exclusions to {category}")
+
+        # Merge other tenant settings
+        for key, value in tenant_settings_dict.items():
+            if key not in ["gl_inclusions", "gl_exclusions"]:  # We've already handled these
+                if key in result["settings"]:
+                    if isinstance(value, dict) and isinstance(result["settings"][key], dict):
+                        # Deep merge for dictionaries
+                        result["settings"][key] = deep_merge(result["settings"][key], value)
+                    elif value is not None and value != "":
+                        # Override with tenant value if not empty
+                        result["settings"][key] = value
+                else:
+                    # Add new key from tenant settings
+                    result["settings"][key] = value
 
         # Include tenant-specific attributes
         tenant_specific = {
@@ -546,6 +573,10 @@ def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[st
         if "cap_settings" not in result["settings"]:
             result["settings"]["cap_settings"] = {}
         result["settings"]["cap_settings"]["cap_type"] = "previous_year"  # Default cap type
+
+    # Add debugging output to verify the final merged settings
+    logger.info(f"Final GL inclusions: {result['settings'].get('gl_inclusions', {})}")
+    logger.info(f"Final GL exclusions: {result['settings'].get('gl_exclusions', {})}")
 
     return result
 
@@ -576,47 +607,55 @@ def load_gl_data(property_id: str) -> List[Dict[str, Any]]:
         return []
 
 
-def is_gl_account_included(gl_account: str, inclusions: List[str], exclusions: List[str]) -> bool:
-    """Determine if a GL account should be included based on inclusion/exclusion rules."""
+def check_account_inclusion(gl_account: str, inclusion_rules: List[str]) -> bool:
+    """Check if a GL account should be included based on inclusion rules."""
+    # No inclusion rules means don't include by default
+    if not inclusion_rules:
+        return False
+
     # Normalize the account for consistent comparison
     clean_account = gl_account.replace('MR', '')
 
-    # EXCLUSIONS FIRST: Check exclusions - these take absolute precedence
-    # If account matches any exclusion rule, it's immediately excluded
-    for exclusion in exclusions:
-        exclusion_rule = exclusion.strip()
-        if '-' in exclusion_rule:  # It's a range
-            if is_in_range(gl_account, exclusion_rule):
-                logger.debug(f"GL account {gl_account} EXCLUDED by range rule: {exclusion_rule}")
-                return False
+    # Check if account matches any inclusion rule
+    for rule in inclusion_rules:
+        rule = rule.strip()
+        if '-' in rule:  # It's a range
+            if is_in_range(gl_account, rule):
+                logger.debug(f"GL account {gl_account} included by range rule: {rule}")
+                return True
         else:  # It's a single account
-            clean_excl = exclusion_rule.replace('MR', '')
-            if clean_excl == clean_account:
-                logger.debug(f"GL account {gl_account} EXCLUDED by exact match: {exclusion_rule}")
-                return False
+            clean_rule = rule.replace('MR', '')
+            if clean_rule == clean_account:
+                logger.debug(f"GL account {gl_account} included by exact match: {rule}")
+                return True
 
-    # INCLUSIONS SECOND: Check inclusions
-    # If there are inclusion rules, account must match at least one to be included
-    if inclusions:
-        is_included = False
-        for inclusion in inclusions:
-            inclusion_rule = inclusion.strip()
-            if '-' in inclusion_rule:  # It's a range
-                if is_in_range(gl_account, inclusion_rule):
-                    logger.debug(f"GL account {gl_account} INCLUDED by range rule: {inclusion_rule}")
-                    is_included = True
-                    break
-            else:  # It's a single account
-                clean_incl = inclusion_rule.replace('MR', '')
-                if clean_incl == clean_account:
-                    logger.debug(f"GL account {gl_account} INCLUDED by exact match: {inclusion_rule}")
-                    is_included = True
-                    break
-        return is_included
+    # Account didn't match any inclusion rule
+    return False
 
-    # DEFAULT BEHAVIOR CHANGED: If no inclusion rules specified, EXCLUDE by default for safety
-    # This prevents including unintended accounts when inclusions list is empty
-    logger.debug(f"GL account {gl_account} EXCLUDED by default (no inclusion rules)")
+
+def check_account_exclusion(gl_account: str, exclusion_rules: List[str]) -> bool:
+    """Check if a GL account should be excluded based on exclusion rules."""
+    # No exclusion rules means don't exclude
+    if not exclusion_rules:
+        return False
+
+    # Normalize the account for consistent comparison
+    clean_account = gl_account.replace('MR', '')
+
+    # Check if account matches any exclusion rule
+    for rule in exclusion_rules:
+        rule = rule.strip()
+        if '-' in rule:  # It's a range
+            if is_in_range(gl_account, rule):
+                logger.debug(f"GL account {gl_account} excluded by range rule: {rule}")
+                return True
+        else:  # It's a single account
+            clean_rule = rule.replace('MR', '')
+            if clean_rule == clean_account:
+                logger.debug(f"GL account {gl_account} excluded by exact match: {rule}")
+                return True
+
+    # Account didn't match any exclusion rule
     return False
 
 
@@ -626,114 +665,153 @@ def filter_gl_accounts(
         recon_periods: List[str],
         categories: List[str] = ['cam', 'ret']
 ) -> Dict[str, Any]:
-    """Filter GL entries and categorize them for CAM reconciliation."""
+    """Filter GL entries and categorize them for CAM reconciliation with detailed tracking."""
     # Get inclusion/exclusion settings
     gl_settings = settings.get('settings', {})
     inclusions = gl_settings.get('gl_inclusions', {})
     exclusions = gl_settings.get('gl_exclusions', {})
 
-    # Ensure we have properly structured inclusions and exclusions
-    # This is just to make sure all categories have entries in the dictionaries
-    for category in categories:
-        if category not in inclusions:
-            inclusions[category] = []
-        if category not in exclusions:
-            exclusions[category] = []
-
     # Log inclusion/exclusion settings
-    logger.info(f"GL inclusions from settings: {inclusions}")
-    logger.info(f"GL exclusions from settings: {exclusions}")
+    logger.info(f"GL inclusions used for filtering: {inclusions}")
+    logger.info(f"GL exclusions used for filtering: {exclusions}")
 
-    # Initialize result containers for each category
-    filtered_entries = {
-        'cam': [],
-        'ret': [],
-        'admin_fee': [],
-        'base': [],
-        'cap': [],
-        'other': []
-    }
+    # Initialize result containers
+    gross_entries = {cat: [] for cat in categories + ['base', 'cap']}
+    exclusion_entries = {cat: [] for cat in categories + ['base', 'cap']}
+    net_entries = {cat: [] for cat in categories + ['base', 'cap', 'other']}
 
-    # List of GL accounts included in each category
-    included_accounts = {
-        'cam': set(),
-        'ret': set(),
-        'admin_fee': set()
-    }
+    # Track amounts
+    gross_amounts = {cat: Decimal('0') for cat in categories + ['base', 'cap']}
+    exclusion_amounts = {cat: Decimal('0') for cat in categories + ['base', 'cap']}
 
-    # Filter and categorize transactions
+    # Track GL accounts
+    included_accounts = {cat: set() for cat in categories + ['base', 'cap']}
+    excluded_accounts = {cat: set() for cat in categories + ['base', 'cap']}
+
+    # Process transactions
     for transaction in gl_data:
         gl_account = transaction.get('GL Account', '')
         period = transaction.get('PERIOD', '')
         net_amount = to_decimal(transaction.get('Net Amount', Decimal('0')))
-        account_type = transaction.get('Account Type', '')  # Get the account type if available
 
-        # Skip transactions with missing data or zero amount
-        if not gl_account or not period or net_amount == 0:
+        # Skip invalid transactions or outside recon periods
+        if not gl_account or not period or net_amount == 0 or str(period) not in recon_periods:
             continue
 
-        # Skip transactions outside the reconciliation periods
-        if str(period) not in recon_periods:
-            continue
-
-        # Make a copy of the transaction to avoid modifying the original
+        # Make a copy of the transaction
         processed_transaction = transaction.copy()
-
-        # For CAM/RET calculations, correct the sign of revenue/expense entries:
-        # - For expenses (normally credits with negative Net Amount), keep as negative
-        # - For income/revenue (normally credits with negative Net Amount), keep as negative
-        # This preserves the accounting convention where expenses reduce the account balance
-        # and income/revenue increases it
         processed_transaction['Net Amount'] = net_amount
 
-        # Check and categorize the transaction
+        # Process each category
         for category in categories:
-            # Skip categories that aren't requested
-            if category not in ['cam', 'ret', 'admin_fee']:
-                continue
-
-            # Check inclusion/exclusion for this category
             category_inclusions = inclusions.get(category, [])
             category_exclusions = exclusions.get(category, [])
 
-            if is_gl_account_included(gl_account, category_inclusions, category_exclusions):
-                filtered_entries[category].append(processed_transaction)
-                included_accounts[category].add(gl_account)
+            # Step 1: Check if account matches ANY inclusion rule
+            is_gross_included = check_account_inclusion(gl_account, category_inclusions)
 
-                # Also add to base and cap categories unless specifically excluded
-                if category in ['cam', 'ret']:
-                    # Check base year exclusions
-                    base_exclusions = exclusions.get('base', [])
-                    if not is_gl_account_included(gl_account, [], base_exclusions):
-                        filtered_entries['base'].append(processed_transaction)
+            if not is_gross_included:
+                # Skip if not included in this category
+                continue
 
-                    # Check cap exclusions
-                    cap_exclusions = exclusions.get('cap', [])
-                    if not is_gl_account_included(gl_account, [], cap_exclusions):
-                        filtered_entries['cap'].append(processed_transaction)
+            # At this point, the account is included in GROSS for this category
+            gross_entries[category].append(processed_transaction)
+            gross_amounts[category] += net_amount
+            included_accounts[category].add(gl_account)
 
-        # If transaction wasn't categorized, add to 'other'
-        if all(gl_account not in included_accounts[cat] for cat in ['cam', 'ret', 'admin_fee'] if cat in categories):
-            filtered_entries['other'].append(processed_transaction)
+            # Step 2: Check if it should be excluded
+            is_excluded = check_account_exclusion(gl_account, category_exclusions)
 
-    # Calculate totals for each category
-    category_totals = {}
+            if is_excluded:
+                # Account is included in GROSS but also excluded
+                exclusion_entries[category].append(processed_transaction)
+                exclusion_amounts[category] += net_amount
+                excluded_accounts[category].add(gl_account)
+                logger.debug(f"GL account {gl_account} excluded from {category} - Amount: {float(net_amount):.2f}")
+            else:
+                # Account is included in GROSS and not excluded - add to NET
+                net_entries[category].append(processed_transaction)
 
-    for category, entries in filtered_entries.items():
-        # For CAM/RET expenses, preserve accounting sign convention (expenses are negative)
-        total = sum(entry['Net Amount'] for entry in entries)
-        category_totals[category] = total
-        logger.info(f"Category {category}: {len(entries)} entries, total: {float(total):.2f}")
+            # Handle base and cap categories for CAM and RET
+            if category in ['cam', 'ret']:
+                # Always add to base and cap GROSS
+                gross_entries['base'].append(processed_transaction)
+                gross_amounts['base'] += net_amount
+                included_accounts['base'].add(gl_account)
 
-    # Log included GL accounts for each category
-    for category, accounts in included_accounts.items():
-        if accounts:
-            logger.info(f"Category {category} includes {len(accounts)} unique GL accounts: {sorted(accounts)}")
+                gross_entries['cap'].append(processed_transaction)
+                gross_amounts['cap'] += net_amount
+                included_accounts['cap'].add(gl_account)
 
+                # Check base exclusions
+                base_exclusions = exclusions.get('base', [])
+                is_base_excluded = False
+                for exclusion in base_exclusions:
+                    if '-' in exclusion:
+                        if is_in_range(gl_account, exclusion):
+                            is_base_excluded = True
+                            break
+                    else:
+                        clean_exclusion = exclusion.replace('MR', '')
+                        clean_account = gl_account.replace('MR', '')
+                        if clean_exclusion == clean_account:
+                            is_base_excluded = True
+                            break
+
+                if is_base_excluded:
+                    exclusion_entries['base'].append(processed_transaction)
+                    exclusion_amounts['base'] += net_amount
+                    excluded_accounts['base'].add(gl_account)
+                else:
+                    net_entries['base'].append(processed_transaction)
+
+                # Check cap exclusions
+                cap_exclusions = exclusions.get('cap', [])
+                is_cap_excluded = False
+                for exclusion in cap_exclusions:
+                    if '-' in exclusion:
+                        if is_in_range(gl_account, exclusion):
+                            is_cap_excluded = True
+                            break
+                    else:
+                        clean_exclusion = exclusion.replace('MR', '')
+                        clean_account = gl_account.replace('MR', '')
+                        if clean_exclusion == clean_account:
+                            is_cap_excluded = True
+                            break
+
+                if is_cap_excluded:
+                    exclusion_entries['cap'].append(processed_transaction)
+                    exclusion_amounts['cap'] += net_amount
+                    excluded_accounts['cap'].add(gl_account)
+                else:
+                    net_entries['cap'].append(processed_transaction)
+
+    # Calculate net amounts
+    net_amounts = {cat: gross_amounts[cat] - exclusion_amounts[cat] for cat in gross_amounts}
+
+    # Log detailed breakdown
+    for category in categories + ['base', 'cap']:
+        logger.info(f"Category {category}:")
+        logger.info(f"  Gross amount: {float(gross_amounts[category]):.2f}")
+        logger.info(f"  Exclusions: {float(exclusion_amounts[category]):.2f}")
+        logger.info(f"  Net amount: {float(net_amounts[category]):.2f}")
+
+        if included_accounts[category]:
+            logger.info(f"  Included accounts: {sorted(included_accounts[category])}")
+        if excluded_accounts[category]:
+            logger.info(f"  Excluded accounts: {sorted(excluded_accounts[category])}")
+
+    # Return comprehensive results
     return {
-        'filtered_entries': filtered_entries,
-        'category_totals': category_totals,
-        'included_accounts': included_accounts
+        'gross_entries': gross_entries,
+        'exclusion_entries': exclusion_entries,
+        'net_entries': net_entries,
+        'gross_amounts': gross_amounts,
+        'exclusion_amounts': exclusion_amounts,
+        'net_amounts': net_amounts,
+        'included_accounts': included_accounts,
+        'excluded_accounts': excluded_accounts
     }
 
 
@@ -768,50 +846,160 @@ def calculate_cam_tax_admin(
         settings: Dict[str, Any],
         categories: List[str] = ['cam', 'ret']
 ) -> Dict[str, Any]:
-    """Calculate CAM, TAX, and admin fee amounts with consistent handling."""
-    category_totals = gl_filtered_data['category_totals']
+    """Calculate CAM, TAX, and admin fee amounts with detailed tracking."""
+    # Get amounts from filtered data
+    gross_amounts = gl_filtered_data['gross_amounts']
+    exclusion_amounts = gl_filtered_data['exclusion_amounts']
+    net_amounts = gl_filtered_data['net_amounts']
+    gross_entries = gl_filtered_data.get('gross_entries', {})
+    net_entries = gl_filtered_data.get('net_entries', {})
 
-    # Calculate CAM and TAX totals
-    cam_total = category_totals.get('cam', Decimal('0')) if 'cam' in categories else Decimal('0')
-    ret_total = category_totals.get('ret', Decimal('0')) if 'ret' in categories else Decimal('0')
+    # Get CAM and TAX amounts
+    cam_gross = gross_amounts.get('cam', Decimal('0')) if 'cam' in categories else Decimal('0')
+    cam_exclusions = exclusion_amounts.get('cam', Decimal('0')) if 'cam' in categories else Decimal('0')
+    cam_net = net_amounts.get('cam', Decimal('0')) if 'cam' in categories else Decimal('0')
+
+    ret_gross = gross_amounts.get('ret', Decimal('0')) if 'ret' in categories else Decimal('0')
+    ret_exclusions = exclusion_amounts.get('ret', Decimal('0')) if 'ret' in categories else Decimal('0')
+    ret_net = net_amounts.get('ret', Decimal('0')) if 'ret' in categories else Decimal('0')
 
     # Calculate admin fee
     admin_fee_percentage = calculate_admin_fee_percentage(settings)
-    admin_fee_amount = cam_total * admin_fee_percentage
+
+    # Get admin_fee specific exclusions
+    admin_fee_exclusions_list = settings.get('settings', {}).get('gl_exclusions', {}).get('admin_fee', [])
+
+    # Calculate admin fee gross (based on CAM gross)
+    admin_fee_gross = cam_gross * admin_fee_percentage
+
+    # Calculate admin fee net properly accounting for both CAM and admin_fee exclusions
+    if admin_fee_exclusions_list:
+        # If there are specific admin_fee exclusions, we need to calculate the net amount
+        # by applying both CAM exclusions (inherited) and admin_fee specific exclusions
+
+        # Start with CAM net (already has CAM exclusions applied)
+        admin_fee_base = cam_net
+
+        # Now apply admin_fee specific exclusions (only on accounts not already excluded by CAM)
+        admin_fee_specific_exclusion_amount = Decimal('0')
+
+        # Process CAM net entries to find additional admin_fee specific exclusions
+        for entry in net_entries.get('cam', []):
+            gl_account = entry.get('GL Account', '')
+            if gl_account and check_account_exclusion(gl_account, admin_fee_exclusions_list):
+                # This account passes CAM exclusions but is specifically excluded from admin_fee
+                admin_fee_specific_exclusion_amount += entry.get('Net Amount', Decimal('0'))
+
+        # Calculate admin fee net by removing admin_fee specific exclusions from the base
+        admin_fee_net = (admin_fee_base - admin_fee_specific_exclusion_amount) * admin_fee_percentage
+
+        # Total admin fee exclusions
+        admin_fee_exclusions = admin_fee_gross - admin_fee_net
+
+        logger.info(f"Admin fee calculation with specific exclusions:")
+        logger.info(f"  CAM gross (base for admin fee gross): {float(cam_gross):.2f}")
+        logger.info(f"  CAM net (after CAM exclusions): {float(cam_net):.2f}")
+        logger.info(f"  Additional admin_fee specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
+        logger.info(
+            f"  Admin fee base after all exclusions: {float(admin_fee_base - admin_fee_specific_exclusion_amount):.2f}")
+    else:
+        # No specific admin_fee exclusions, so admin_fee just inherits CAM exclusions
+        admin_fee_net = cam_net * admin_fee_percentage
+        admin_fee_exclusions = admin_fee_gross - admin_fee_net
 
     # Determine if admin fee is included in cap and base year calculations
     include_in_cap = is_admin_fee_included_in(settings, 'cap')
     include_in_base = is_admin_fee_included_in(settings, 'base')
 
-    # Calculate combined totals
-    combined_total = cam_total + ret_total
+    # Calculate combined totals - ALWAYS using the appropriate gross/net values
+    # First calculate without admin fee
+    combined_gross_total = cam_gross + ret_gross
+    combined_exclusions = cam_exclusions + ret_exclusions
 
-    # For cap calculation
-    cap_base_total = combined_total
+    # Add admin fee to combined totals if needed
+    # Note: admin fee is an additional calculation, not a GL account group like CAM and RET
+    # So we need to add it to combined totals separately
+    combined_gross_with_admin = combined_gross_total + admin_fee_gross
+    combined_exclusions_with_admin = combined_exclusions + admin_fee_exclusions
+    combined_net_with_admin = combined_gross_with_admin - combined_exclusions_with_admin
+
+    # Choose the appropriate totals based on whether we want to include admin fee
+    # For reporting purposes, admin fee is considered part of the total
+    combined_gross_total = combined_gross_with_admin
+    combined_exclusions = combined_exclusions_with_admin
+    combined_net_total = combined_net_with_admin
+
+    # For cap calculation - use appropriate values based on settings
     if include_in_cap:
-        cap_base_total += admin_fee_amount
+        cap_gross_total = combined_gross_with_admin
+        cap_exclusions_total = combined_exclusions_with_admin
+        cap_admin_fee = admin_fee_net
+    else:
+        cap_gross_total = combined_gross_total - admin_fee_gross
+        cap_exclusions_total = combined_exclusions - admin_fee_exclusions
+        cap_admin_fee = Decimal('0')
 
-    # For base year calculation
-    base_year_total = combined_total
+    cap_net_total = cap_gross_total - cap_exclusions_total
+
+    # For base year calculation - use appropriate values based on settings
     if include_in_base:
-        base_year_total += admin_fee_amount
+        base_gross_total = combined_gross_with_admin
+        base_exclusions_total = combined_exclusions_with_admin
+        base_admin_fee = admin_fee_net
+    else:
+        base_gross_total = combined_gross_total - admin_fee_gross
+        base_exclusions_total = combined_exclusions - admin_fee_exclusions
+        base_admin_fee = Decimal('0')
 
-    # Log key calculations
-    logger.info(f"CAM total: {float(cam_total):.2f}")
-    logger.info(f"RET total: {float(ret_total):.2f}")
-    logger.info(
-        f"Admin fee: {float(admin_fee_amount):.2f} ({float(admin_fee_percentage) * 100:.1f}% of {float(cam_total):.2f})")
-    logger.info(f"Admin fee in cap: {include_in_cap}, in base: {include_in_base}")
+    base_net_total = base_gross_total - base_exclusions_total
+
+    # Log detailed calculations
+    logger.info(f"CAM calculations:")
+    logger.info(f"  Gross: {float(cam_gross):.2f}")
+    logger.info(f"  Exclusions: {float(cam_exclusions):.2f}")
+    logger.info(f"  Net: {float(cam_net):.2f}")
+
+    logger.info(f"RET calculations:")
+    logger.info(f"  Gross: {float(ret_gross):.2f}")
+    logger.info(f"  Exclusions: {float(ret_exclusions):.2f}")
+    logger.info(f"  Net: {float(ret_net):.2f}")
+
+    logger.info(f"Admin fee calculations:")
+    logger.info(f"  Percentage: {float(admin_fee_percentage) * 100:.2f}%")
+    logger.info(f"  Gross: {float(admin_fee_gross):.2f}")
+    logger.info(f"  Exclusions: {float(admin_fee_exclusions):.2f}")
+    logger.info(f"  Net: {float(admin_fee_net):.2f}")
+    logger.info(f"  In cap: {include_in_cap}, in base: {include_in_base}")
 
     # Return comprehensive results
     return {
-        'cam_total': cam_total,
-        'ret_total': ret_total,
-        'admin_fee_amount': admin_fee_amount,
+        'cam_gross': cam_gross,
+        'cam_exclusions': cam_exclusions,
+        'cam_net': cam_net,
+
+        'ret_gross': ret_gross,
+        'ret_exclusions': ret_exclusions,
+        'ret_net': ret_net,
+
         'admin_fee_percentage': admin_fee_percentage,
-        'combined_total': combined_total,
-        'cap_base_total': cap_base_total,
-        'base_year_total': base_year_total,
+        'admin_fee_gross': admin_fee_gross,
+        'admin_fee_exclusions': admin_fee_exclusions,
+        'admin_fee_net': admin_fee_net,
+
+        'combined_gross_total': combined_gross_total,
+        'combined_exclusions': combined_exclusions,
+        'combined_net_total': combined_net_total,
+
+        'cap_gross_total': cap_gross_total,
+        'cap_exclusions_total': cap_exclusions_total,
+        'cap_admin_fee': cap_admin_fee,
+        'cap_net_total': cap_net_total,
+
+        'base_gross_total': base_gross_total,
+        'base_exclusions_total': base_exclusions_total,
+        'base_admin_fee': base_admin_fee,
+        'base_net_total': base_net_total,
+
         'include_admin_in_cap': include_in_cap,
         'include_admin_in_base': include_in_base
     }
@@ -1510,7 +1698,7 @@ def generate_csv_report(
         recon_year: int,
         categories: List[str] = ['cam', 'ret']
 ) -> str:
-    """Generate a CSV report from tenant billing results."""
+    """Generate a detailed CSV report with enhanced calculation transparency."""
     # Create output directory if it doesn't exist
     os.makedirs(REPORTS_PATH, exist_ok=True)
 
@@ -1520,35 +1708,50 @@ def generate_csv_report(
     output_path = os.path.join(REPORTS_PATH,
                                f"tenant_billing_{property_id}_{category_str}_{recon_year}_{timestamp}.csv")
 
-    # Define columns for the report
+    # Define columns for the report - enhanced with calculation detail columns
     columns = [
         # Basic tenant information
         'tenant_id', 'tenant_name', 'property_id', 'property_name', 'suite',
         'lease_start', 'lease_end', 'share_method', 'share_percentage',
 
-        # Property totals before tenant share
+        # Property totals
         'property_gl_total',
 
-        # Tenant expense breakdown
-        'cam_total', 'ret_total', 'admin_fee_percentage', 'admin_fee_amount',
-        'combined_total',
+        # CAM breakdown (gross, exclusions, net)
+        'cam_gross_total', 'cam_exclusions', 'cam_net_total',
+
+        # RET breakdown (gross, exclusions, net)
+        'ret_gross_total', 'ret_exclusions', 'ret_net_total',
+
+        # Admin fee breakdown
+        'admin_fee_percentage', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
+
+        # Combined totals
+        'combined_gross_total', 'combined_exclusions', 'combined_net_total',
 
         # Base year details
         'base_year', 'base_year_amount',
-        'total_before_base_adjustment', 'after_base_adjustment',
+        'total_before_base_adjustment', 'base_year_adjustment', 'after_base_adjustment',
 
-        # Cap limit details
+        # Cap details
         'cap_reference_amount', 'cap_percentage', 'cap_limit',
-        'amount_subject_to_cap', 'excluded_amount',
-        'capped_subject_amount', 'cap_limited',
+        'amount_subject_to_cap', 'excluded_from_cap', 'capped_subject_amount',
+        'cap_limited', 'after_cap_amount',
 
-        # Occupancy adjustments
-        'average_occupancy', 'occupancy_adjusted_amount',
+        # Property total before tenant prorations
+        'property_total_before_prorations',
 
         # Capital expenses
         'capital_expenses_total',
 
-        # Override and final amounts
+        # Tenant share calculation (first proration)
+        'tenant_share_amount', 'tenant_capital_expenses', 'subtotal_after_tenant_share',
+
+        # Occupancy adjustment (second proration)
+        'average_occupancy', 'occupied_months', 'full_months', 'partial_months',
+        'subtotal_before_occupancy_adjustment', 'occupancy_adjusted_amount',
+
+        # Final amounts
         'base_billing', 'override_amount', 'final_billing',
 
         # Payment tracking
@@ -1567,7 +1770,7 @@ def generate_csv_report(
                 filtered_row = {col: row.get(col, '') for col in columns}
                 writer.writerow(filtered_row)
 
-        logger.info(f"Generated CSV report with {len(report_rows)} rows: {output_path}")
+        logger.info(f"Generated enhanced CSV report with {len(report_rows)} rows: {output_path}")
         return output_path
     except Exception as e:
         logger.error(f"Error generating CSV report: {str(e)}")
@@ -1590,34 +1793,38 @@ def generate_json_report(
     output_path = os.path.join(REPORTS_PATH,
                                f"tenant_billing_detail_{property_id}_{category_str}_{recon_year}_{timestamp}.json")
 
-    # JSON encoder class to handle Decimal objects
-    class DecimalEncoder(json.JSONEncoder):
+    # JSON encoder class to handle Decimal and Set objects
+    class CustomEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, Decimal):
                 return str(obj)
+            if isinstance(obj, set):
+                return list(obj)  # Convert sets to lists for JSON serialization
             # Let the base class default method handle other types
-            return super(DecimalEncoder, self).default(obj)
+            return super().default(obj)
 
-    # Recursively convert all Decimal objects in complex nested structures
-    def convert_decimals(obj):
-        if isinstance(obj, Decimal):
-            return str(obj)
-        elif isinstance(obj, dict):
-            return {k: convert_decimals(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_decimals(item) for item in obj]
-        elif isinstance(obj, tuple):
-            return tuple(convert_decimals(item) for item in obj)
+    # Create a clean copy of the data for serialization
+    def prepare_for_serialization(data):
+        if isinstance(data, Decimal):
+            return str(data)
+        elif isinstance(data, set):
+            return list(data)
+        elif isinstance(data, dict):
+            return {k: prepare_for_serialization(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [prepare_for_serialization(item) for item in data]
+        elif hasattr(data, '__dict__'):
+            return prepare_for_serialization(data.__dict__)
         else:
-            return obj
+            return data
 
-    # Apply the recursive conversion to make the results JSON serializable
-    serializable_results = convert_decimals(billing_results)
+    # Apply the conversion to make the results JSON serializable
+    serializable_results = prepare_for_serialization(billing_results)
 
     # Write the JSON file
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(serializable_results, f, indent=2, cls=DecimalEncoder)
+            json.dump(serializable_results, f, indent=2, cls=CustomEncoder)
 
         logger.info(f"Generated detailed JSON report with {len(billing_results)} entries: {output_path}")
         return output_path
@@ -1637,19 +1844,7 @@ def calculate_tenant_reconciliation(
         skip_cap_update: bool = False
 ) -> Dict[str, Any]:
     """
-    Calculate CAM reconciliation for a single tenant with a linear flow.
-
-    Steps:
-    1. Load settings (portfolio, property, tenant)
-    2. Load and filter GL data
-    3. Calculate CAM, TAX, admin fee
-    4. Apply base year adjustment
-    5. Apply cap limits
-    6. Add capital expenses
-    7. Calculate pro-rata share
-    8. Apply occupancy adjustment
-    9. Apply any overrides
-    10. Calculate final billing amount
+    Calculate CAM reconciliation for a single tenant with a linear flow and detailed reporting.
     """
     logger.info(f"===== Starting reconciliation for tenant {tenant_id} in property {property_id} =====")
     logger.info(f"Categories: {categories}, Year: {recon_year}")
@@ -1658,25 +1853,15 @@ def calculate_tenant_reconciliation(
     settings = merge_settings(property_id, tenant_id)
     property_settings = merge_settings(property_id)  # For property-level calculations
 
-    logger.info(f"Loaded settings for tenant {tenant_id} in property {property_id}")
-
     # STEP 2: Load and filter GL data
     gl_data = load_gl_data(property_id)
-    logger.info(f"Loaded {len(gl_data)} raw GL entries for property {property_id}")
-
-    # For reconciliation calculations, only use the reconciliation periods
     recon_periods = periods_dict['recon_periods']
 
+    # Enhanced filtering with detailed tracking
     gl_filtered_data = filter_gl_accounts(gl_data, settings, recon_periods, categories)
-    logger.info(
-        f"Filtered GL data to {sum(len(entries) for entries in gl_filtered_data['filtered_entries'].values())} entries")
 
-    # STEP 3: Calculate CAM, TAX, admin fee - PROPERTY LEVEL FIRST
+    # STEP 3: Calculate CAM, TAX, admin fee - PROPERTY LEVEL
     property_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, property_settings, categories)
-
-    # Total property expenses (for reporting)
-    property_gl_total = property_cam_tax_admin['combined_total']
-    logger.info(f"Property total (CAM+TAX): {float(property_gl_total):.2f}")
 
     # STEP 4: Calculate CAM, TAX, admin fee - TENANT SPECIFIC
     tenant_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, settings, categories)
@@ -1684,39 +1869,27 @@ def calculate_tenant_reconciliation(
     # STEP 5: Apply base year adjustment
     base_year_result = calculate_base_year_adjustment(
         recon_year,
-        tenant_cam_tax_admin['base_year_total'],
+        tenant_cam_tax_admin['base_net_total'],
         settings
     )
 
+    # Store the amount before and after base year adjustment
+    before_base_amount = tenant_cam_tax_admin['base_net_total']
+    base_year_adjustment = Decimal('0')
+
+    if base_year_result['base_year_applies']:
+        base_year_adjustment = base_year_result['base_year_amount']
+
     after_base_amount = base_year_result['after_base_adjustment']
-    logger.info(f"After base year adjustment: {float(after_base_amount):.2f}")
 
-    # STEP 6: Prepare amounts for cap calculation - IMPORTANT FOR CORRECT CAP ENFORCEMENT
-    # Separate amounts subject to cap from amounts excluded from cap
-    cap_exclusions = settings.get('settings', {}).get('gl_exclusions', {}).get('cap', [])
+    # STEP 6: Prepare amounts for cap calculation
+    # The cap subject amount is the total after base year adjustment
+    # but we need to separate what's subject to cap vs excluded from cap
+    amount_subject_to_cap = tenant_cam_tax_admin['cap_net_total']
 
-    # If there are cap exclusions, calculate amount subject to cap and excluded amount
-    # Otherwise, all the amount after base adjustment is subject to cap
-    amount_subject_to_cap = Decimal('0')
-    excluded_from_cap_amount = Decimal('0')
-
-    # Get entries that are and aren't subject to cap
-    cap_entries = gl_filtered_data['filtered_entries'].get('cap', [])
-
-    # Handle caps based on filtered entries
-    if cap_entries:
-        # Calculate amount subject to cap from filtered cap entries
-        amount_subject_to_cap = sum(entry['Net Amount'] for entry in cap_entries)
-
-        # Calculate excluded amount as the difference between total and amount subject to cap
-        excluded_from_cap_amount = after_base_amount - amount_subject_to_cap
-    else:
-        # If no specific cap entries found, all of after_base_amount is subject to cap
-        amount_subject_to_cap = after_base_amount
-        excluded_from_cap_amount = Decimal('0')
-
-    logger.info(f"Amount subject to cap: {float(amount_subject_to_cap):.2f}")
-    logger.info(f"Amount excluded from cap: {float(excluded_from_cap_amount):.2f}")
+    # Calculate the excluded from cap amount (what should be added back after capping)
+    # This is the difference between the base net total and cap net total
+    excluded_from_cap_amount = after_base_amount - amount_subject_to_cap
 
     # STEP 7: Apply cap limits
     cap_history = load_cap_history()
@@ -1733,31 +1906,39 @@ def calculate_tenant_reconciliation(
 
     # After applying caps, get the result
     after_cap_amount = cap_result['final_capped_amount']
-    logger.info(f"After cap enforcement: {float(after_cap_amount):.2f}")
 
     # STEP 8: Calculate capital expenses
     capital_expenses_result = calculate_capital_expenses(settings, recon_year, recon_periods)
     capital_expenses_amount = capital_expenses_result['total_capital_expenses']
-    logger.info(f"Capital expenses: {float(capital_expenses_amount):.2f}")
 
-    # STEP 9: Calculate tenant share using pro-rata percentage
+    # STEP 9: Calculate property-level total after all adjustments
+    property_total_after_adjustments = after_cap_amount + capital_expenses_amount
+
+    # STEP 10: Apply tenant share percentage (PRORATION STEP)
     tenant_share_percentage = calculate_tenant_share_percentage(settings, property_settings)
     tenant_share = calculate_tenant_share(after_cap_amount, tenant_share_percentage)
-    logger.info(f"Tenant share ({float(tenant_share_percentage) * 100:.6f}%): {float(tenant_share):.2f}")
 
-    # STEP 10: Apply capital expenses (already tenant-specific or pro-rated)
-    subtotal_after_capital = tenant_share + capital_expenses_amount
-    logger.info(f"After capital expenses: {float(subtotal_after_capital):.2f}")
+    # Apply same proration to capital expenses if needed
+    # Note: Capital expenses might already be tenant-specific, check your business rules
+    tenant_capital_expenses = capital_expenses_amount
 
-    # STEP 11: Calculate occupancy adjustment
+    # Calculate subtotal after tenant share calculation
+    subtotal_after_tenant_share = tenant_share + tenant_capital_expenses
+
+    # STEP 11: Apply occupancy adjustment (PRORATION STEP)
     occupancy_factors = calculate_occupancy_factors(
         recon_periods,
         settings.get('lease_start'),
         settings.get('lease_end')
     )
 
-    occupancy_adjusted_amount = apply_occupancy_adjustment(subtotal_after_capital, occupancy_factors)
-    logger.info(f"After occupancy adjustment: {float(occupancy_adjusted_amount):.2f}")
+    # Calculate average occupancy for reporting
+    avg_occupancy = Decimal('1')
+    if occupancy_factors:
+        avg_occupancy = sum(occupancy_factors.values()) / len(occupancy_factors)
+
+    # Apply occupancy adjustment
+    occupancy_adjusted_amount = apply_occupancy_adjustment(subtotal_after_tenant_share, occupancy_factors)
 
     # STEP 12: Apply any tenant override
     override_info = get_tenant_override(tenant_id, property_id)
@@ -1772,36 +1953,25 @@ def calculate_tenant_reconciliation(
         logger.info(f"Applying override amount: {float(override_amount):.2f}")
         final_billing = override_amount
 
-    logger.info(f"Final billing amount: {float(final_billing):.2f}")
-
     # STEP 13: Update cap history unless skipped
     if not skip_cap_update:
         cap_history = update_cap_history(tenant_id, recon_year, base_billing)
 
     # STEP 14: Calculate payment tracking information
     old_monthly = get_old_monthly_payment(tenant_id, property_id)
-
-    # Calculate new monthly amount
     recon_period_count = len(recon_periods)
     new_monthly = calculate_new_monthly_payment(final_billing, recon_period_count)
-
-    # Calculate payment change metrics
     payment_change = calculate_payment_change(old_monthly, new_monthly)
 
-    # STEP 15: Create a detailed report row
+    # STEP 15: Create a detailed report row with enhanced fields
     share_method = settings.get('settings', {}).get('prorate_share_method', 'RSF')
 
-    # Calculate average occupancy
-    avg_occupancy = Decimal('1')
-    if occupancy_factors:
-        avg_occupancy = sum(occupancy_factors.values()) / len(occupancy_factors)
-
-    # Number of full/partial months
+    # Count full/partial months
     occupied_months = sum(1 for f in occupancy_factors.values() if f > 0)
     full_months = sum(1 for f in occupancy_factors.values() if f >= Decimal('1'))
     partial_months = sum(1 for f in occupancy_factors.values() if Decimal('0') < f < Decimal('1'))
 
-    # Format report row
+    # Format enhanced report row with detailed calculation steps
     report_row = {
         # Basic tenant information
         'tenant_id': tenant_id,
@@ -1816,40 +1986,65 @@ def calculate_tenant_reconciliation(
         'share_method': share_method,
         'share_percentage': format_percentage(tenant_share_percentage * Decimal('100'), 4),
 
-        # Property grand total
-        'property_gl_total': format_currency(property_gl_total),
+        # Property gross total
+        'property_gl_total': format_currency(property_cam_tax_admin['combined_gross_total']),
 
-        # Expense breakdown
-        'cam_total': format_currency(tenant_cam_tax_admin['cam_total']),
-        'ret_total': format_currency(tenant_cam_tax_admin['ret_total']),
+        # CAM breakdown (gross, exclusions, net)
+        'cam_gross_total': format_currency(tenant_cam_tax_admin['cam_gross']),
+        'cam_exclusions': format_currency(tenant_cam_tax_admin['cam_exclusions']),
+        'cam_net_total': format_currency(tenant_cam_tax_admin['cam_net']),
+
+        # RET breakdown (gross, exclusions, net)
+        'ret_gross_total': format_currency(tenant_cam_tax_admin['ret_gross']),
+        'ret_exclusions': format_currency(tenant_cam_tax_admin['ret_exclusions']),
+        'ret_net_total': format_currency(tenant_cam_tax_admin['ret_net']),
+
+        # Admin fee breakdown
         'admin_fee_percentage': format_percentage(tenant_cam_tax_admin['admin_fee_percentage'] * Decimal('100'), 2),
-        'admin_fee_amount': format_currency(tenant_cam_tax_admin['admin_fee_amount']),
-        'combined_total': format_currency(tenant_cam_tax_admin['combined_total']),
+        'admin_fee_gross': format_currency(tenant_cam_tax_admin['admin_fee_gross']),
+        'admin_fee_exclusions': format_currency(tenant_cam_tax_admin['admin_fee_exclusions']),
+        'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net']),
+
+        # Combined totals
+        'combined_gross_total': format_currency(tenant_cam_tax_admin['combined_gross_total']),
+        'combined_exclusions': format_currency(tenant_cam_tax_admin['combined_exclusions']),
+        'combined_net_total': format_currency(tenant_cam_tax_admin['combined_net_total']),
 
         # Base year details
         'base_year': base_year_result['base_year'],
         'base_year_amount': format_currency(base_year_result['base_year_amount']),
-        'total_before_base_adjustment': format_currency(base_year_result['total_before_adjustment']),
-        'after_base_adjustment': format_currency(base_year_result['after_base_adjustment']),
+        'total_before_base_adjustment': format_currency(before_base_amount),
+        'base_year_adjustment': format_currency(base_year_adjustment),
+        'after_base_adjustment': format_currency(after_base_amount),
 
         # Cap details
         'cap_reference_amount': format_currency(cap_result['cap_limit_results']['reference_amount']),
         'cap_percentage': format_percentage(cap_result['cap_limit_results']['cap_percentage'] * Decimal('100'), 2),
         'cap_limit': format_currency(cap_result['cap_limit_results']['effective_cap_limit']),
         'amount_subject_to_cap': format_currency(cap_result['amount_subject_to_cap']),
-        'excluded_amount': format_currency(cap_result['excluded_amount']),
+        'excluded_from_cap': format_currency(cap_result['excluded_amount']),
         'capped_subject_amount': format_currency(cap_result['capped_subject_amount']),
         'cap_limited': 'Yes' if cap_result['cap_limited'] else 'No',
+        'after_cap_amount': format_currency(after_cap_amount),
 
-        # Occupancy details
+        # Property total before tenant prorations
+        'property_total_before_prorations': format_currency(property_total_after_adjustments),
+
+        # Capital expenses
+        'capital_expenses_total': format_currency(capital_expenses_amount),
+
+        # Tenant share calculation (first proration)
+        'tenant_share_amount': format_currency(tenant_share),
+        'tenant_capital_expenses': format_currency(tenant_capital_expenses),
+        'subtotal_after_tenant_share': format_currency(subtotal_after_tenant_share),
+
+        # Occupancy adjustment (second proration)
         'average_occupancy': f"{float(avg_occupancy):.4f}",
         'occupied_months': occupied_months,
         'full_months': full_months,
         'partial_months': partial_months,
+        'subtotal_before_occupancy_adjustment': format_currency(subtotal_after_tenant_share),
         'occupancy_adjusted_amount': format_currency(occupancy_adjusted_amount),
-
-        # Capital expenses
-        'capital_expenses_total': format_currency(capital_expenses_amount),
 
         # Final amounts
         'base_billing': format_currency(base_billing),
@@ -1875,14 +2070,18 @@ def calculate_tenant_reconciliation(
         'categories': categories,
         'periods': periods_dict,
 
-        # Calculation components
-        'property_gl_total': property_gl_total,
+        # Detailed calculation components
+        'gl_filtered_data': gl_filtered_data,
+        'property_cam_tax_admin': property_cam_tax_admin,
         'tenant_cam_tax_admin': tenant_cam_tax_admin,
         'base_year_result': base_year_result,
         'cap_result': cap_result,
         'capital_expenses_result': capital_expenses_result,
         'tenant_share_percentage': tenant_share_percentage,
+        'tenant_share': tenant_share,
+        'property_total_after_adjustments': property_total_after_adjustments,
         'occupancy_factors': occupancy_factors,
+        'average_occupancy': avg_occupancy,
         'override_info': override_info,
 
         # Final amounts and payment tracking
@@ -1892,7 +2091,7 @@ def calculate_tenant_reconciliation(
         'new_monthly': new_monthly,
         'payment_change': payment_change,
 
-        # Report row for CSV export
+        # Enhanced report row for CSV export
         'report_row': report_row
     }
 
