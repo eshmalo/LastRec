@@ -444,22 +444,29 @@ def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[st
                     # For inclusion/exclusion settings, we want to MERGE the values by category
                     merged_dict = result["settings"][key].copy()
 
-                    # For each category in property settings
-                    for category, category_values in value.items():
-                        if category in merged_dict:
-                            # Different handling for inclusions vs exclusions
-                            if key == "gl_exclusions":
-                                # For exclusions, we APPEND property-level exclusions to portfolio exclusions
-                                if isinstance(category_values, list) and isinstance(merged_dict[category], list):
-                                    # Create a list of ALL exclusions from both levels
-                                    merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
+                    # Check if property settings object is empty for inclusions
+                    if key == "gl_inclusions" and not value:
+                        # If property has empty inclusions object, preserve portfolio settings
+                        logger.info(f"Property has empty {key}, preserving portfolio-level settings")
+                        pass  # Keep the merged_dict as is (with portfolio settings)
+                    else:
+                        # For each category in property settings
+                        for category, category_values in value.items():
+                            if category in merged_dict:
+                                # Different handling for inclusions vs exclusions
+                                if key == "gl_exclusions":
+                                    # For exclusions, we APPEND property-level exclusions to portfolio exclusions
+                                    if isinstance(category_values, list) and isinstance(merged_dict[category], list):
+                                        # Create a list of ALL exclusions from both levels
+                                        merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
+                                else:
+                                    # For inclusions, if property specifies something, it overrides
+                                    # ONLY if the category_values is not empty
+                                    if category_values:  # Only override if non-empty
+                                        merged_dict[category] = category_values
                             else:
-                                # For inclusions, if property specifies something, it overrides
-                                if category_values or category_values == []:
-                                    merged_dict[category] = category_values
-                        else:
-                            # If category doesn't exist at all, add it
-                            merged_dict[category] = category_values
+                                # If category doesn't exist at all, add it
+                                merged_dict[category] = category_values
 
                     result["settings"][key] = merged_dict
                 else:
@@ -485,22 +492,29 @@ def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[st
                         # For inclusion/exclusion settings, we want to MERGE the values by category
                         merged_dict = result["settings"][key].copy()
 
-                        # For each category in tenant settings
-                        for category, category_values in value.items():
-                            if category in merged_dict:
-                                # Different handling for inclusions vs exclusions
-                                if key == "gl_exclusions":
-                                    # For exclusions, we APPEND tenant-level exclusions to existing exclusions
-                                    if isinstance(category_values, list) and isinstance(merged_dict[category], list):
-                                        # Create a list of ALL exclusions from both levels
-                                        merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
+                        # Check if tenant settings object is empty for inclusions
+                        if key == "gl_inclusions" and not value:
+                            # If tenant has empty inclusions object, preserve existing settings
+                            logger.info(f"Tenant has empty {key}, preserving higher-level settings")
+                            pass  # Keep the merged_dict as is (with portfolio/property settings)
+                        else:
+                            # For each category in tenant settings
+                            for category, category_values in value.items():
+                                if category in merged_dict:
+                                    # Different handling for inclusions vs exclusions
+                                    if key == "gl_exclusions":
+                                        # For exclusions, we APPEND tenant-level exclusions to existing exclusions
+                                        if isinstance(category_values, list) and isinstance(merged_dict[category], list):
+                                            # Create a list of ALL exclusions from both levels
+                                            merged_dict[category] = merged_dict[category] + [val for val in category_values if val not in merged_dict[category]]
+                                    else:
+                                        # For inclusions, if tenant specifies something, it overrides
+                                        # ONLY if the category_values is not empty
+                                        if category_values:  # Only override if non-empty
+                                            merged_dict[category] = category_values
                                 else:
-                                    # For inclusions, if tenant specifies something, it overrides
-                                    if category_values or category_values == []:
-                                        merged_dict[category] = category_values
-                            else:
-                                # If category doesn't exist at all, add it
-                                merged_dict[category] = category_values
+                                    # If category doesn't exist at all, add it
+                                    merged_dict[category] = category_values
 
                         result["settings"][key] = merged_dict
                     else:
@@ -582,9 +596,6 @@ def is_gl_account_included(gl_account: str, inclusions: List[str], exclusions: L
                 return False
 
     # INCLUSIONS SECOND: Check inclusions
-    # Empty lists of inclusions should not be treated as "include nothing"
-    # Instead, we move on to the next step
-
     # If there are inclusion rules, account must match at least one to be included
     if inclusions:
         is_included = False
@@ -603,9 +614,10 @@ def is_gl_account_included(gl_account: str, inclusions: List[str], exclusions: L
                     break
         return is_included
 
-    # DEFAULT THIRD: If no inclusion rules specified, include by default
-    logger.debug(f"GL account {gl_account} INCLUDED by default (no inclusion rules)")
-    return True
+    # DEFAULT BEHAVIOR CHANGED: If no inclusion rules specified, EXCLUDE by default for safety
+    # This prevents including unintended accounts when inclusions list is empty
+    logger.debug(f"GL account {gl_account} EXCLUDED by default (no inclusion rules)")
+    return False
 
 
 def filter_gl_accounts(
@@ -653,7 +665,8 @@ def filter_gl_accounts(
     for transaction in gl_data:
         gl_account = transaction.get('GL Account', '')
         period = transaction.get('PERIOD', '')
-        net_amount = transaction.get('Net Amount', Decimal('0'))
+        net_amount = to_decimal(transaction.get('Net Amount', Decimal('0')))
+        account_type = transaction.get('Account Type', '')  # Get the account type if available
 
         # Skip transactions with missing data or zero amount
         if not gl_account or not period or net_amount == 0:
@@ -662,6 +675,16 @@ def filter_gl_accounts(
         # Skip transactions outside the reconciliation periods
         if str(period) not in recon_periods:
             continue
+
+        # Make a copy of the transaction to avoid modifying the original
+        processed_transaction = transaction.copy()
+
+        # For CAM/RET calculations, correct the sign of revenue/expense entries:
+        # - For expenses (normally credits with negative Net Amount), keep as negative
+        # - For income/revenue (normally credits with negative Net Amount), keep as negative
+        # This preserves the accounting convention where expenses reduce the account balance
+        # and income/revenue increases it
+        processed_transaction['Net Amount'] = net_amount
 
         # Check and categorize the transaction
         for category in categories:
@@ -674,7 +697,7 @@ def filter_gl_accounts(
             category_exclusions = exclusions.get(category, [])
 
             if is_gl_account_included(gl_account, category_inclusions, category_exclusions):
-                filtered_entries[category].append(transaction)
+                filtered_entries[category].append(processed_transaction)
                 included_accounts[category].add(gl_account)
 
                 # Also add to base and cap categories unless specifically excluded
@@ -682,21 +705,22 @@ def filter_gl_accounts(
                     # Check base year exclusions
                     base_exclusions = exclusions.get('base', [])
                     if not is_gl_account_included(gl_account, [], base_exclusions):
-                        filtered_entries['base'].append(transaction)
+                        filtered_entries['base'].append(processed_transaction)
 
                     # Check cap exclusions
                     cap_exclusions = exclusions.get('cap', [])
                     if not is_gl_account_included(gl_account, [], cap_exclusions):
-                        filtered_entries['cap'].append(transaction)
+                        filtered_entries['cap'].append(processed_transaction)
 
         # If transaction wasn't categorized, add to 'other'
         if all(gl_account not in included_accounts[cat] for cat in ['cam', 'ret', 'admin_fee'] if cat in categories):
-            filtered_entries['other'].append(transaction)
+            filtered_entries['other'].append(processed_transaction)
 
     # Calculate totals for each category
     category_totals = {}
 
     for category, entries in filtered_entries.items():
+        # For CAM/RET expenses, preserve accounting sign convention (expenses are negative)
         total = sum(entry['Net Amount'] for entry in entries)
         category_totals[category] = total
         logger.info(f"Category {category}: {len(entries)} entries, total: {float(total):.2f}")
