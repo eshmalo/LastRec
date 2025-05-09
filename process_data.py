@@ -741,8 +741,8 @@ def generate_settings_files():
                     "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, and amortization period in years."
                 }
             },
-            # Capital expenses that can be amortized over time (property-level)
-            "property_capital_expenses": [
+            # Capital expenses that can be amortized over time
+            "capital_expenses": [
                 {
                     "id": "",
                     "description": "",
@@ -767,51 +767,51 @@ def generate_settings_files():
                     "base": [],  # Property-specific GL accounts to exclude from base year calculations
                     "cap": []  # Property-specific GL accounts to exclude from cap calculations
                 },
-                
+
                 # Property Information
                 "square_footage": property_data.get('Total RSF') or "",  # Example: 100000 - Property's total square footage
-                
+
                 # Pro-rata Share Method at Property Level
                 # Options: "RSF" (based on square footage), "Fixed" (fixed percentage), "Custom" (tenant-specific)
                 "prorate_share_method": "",
-                
+
                 # Admin Fee Settings - Property-specific
                 # Example: 0.15 for 15% - Overrides portfolio setting for this property only
                 "admin_fee_percentage": "",
-                
+
                 # Base Year Settings - Property-specific defaults
                 "base_year": "",  # Example: "2020" - Base year for all tenants in this property
                 "base_year_amount": "",  # Example: 100000 - Fixed base amount for property (not tenant share)
-                
+
                 # Increase Limit Settings - Property-specific defaults
                 "min_increase": "",  # Example: 0.03 for 3% - Minimum annual increase for all tenants
                 "max_increase": "",  # Example: 0.05 for 5% - Maximum annual increase for all tenants
                 "stop_amount": "",   # Example: 5.75 - Stop amount per square foot for property
-                
+
                 # Cap Settings - Property-specific defaults
                 "cap_settings": {
                     # Example: 0.05 for 5% - Maximum percentage increase allowed per year
                     "cap_percentage": "",
-                    
+
                     # Options: "previous_year" (compares to immediate prior year only)
                     # or "highest_previous_year" (compares to highest of all prior years)
                     "cap_type": "",
-                    
+
                     # Override cap year and amount - for manual specification of reference year
                     "override_cap_year": "",  # Example: "2023" - Year to use as reference
                     "override_cap_amount": ""  # Example: 150000 - Amount to use for that year
                 },
-                
+
                 # Admin Fee in Cap/Base - Property-specific setting
-                # Options: null (exclude from both), "cap" (include in cap only), 
+                # Options: null (exclude from both), "cap" (include in cap only),
                 # "base" (include in base only), or "cap,base" (include in both)
-                "admin_fee_in_cap_base": ""  
+                "admin_fee_in_cap_base": ""
             }
         }
-        
+
         # Path to existing property settings file
         property_settings_file = os.path.join(property_specific_dir, 'property_settings.json')
-        
+
         # Load existing property settings if they exist
         existing_property = {}
         if os.path.exists(property_settings_file):
@@ -834,14 +834,14 @@ def generate_settings_files():
                 print(f"Error loading existing property settings for {property_id}: {e}")
         else:
             new_property_count += 1
-        
+
         # Create property settings, preserving specified fields
         property_settings = default_property_settings.copy()
-        
+
         # Preserve specified fields from existing settings
         if existing_property:
             # Helper functions defined earlier in the portfolio section
-            
+
             # Preserve specified fields
             for field in property_preserve_fields:
                 value = get_nested(existing_property, field)
@@ -859,22 +859,22 @@ def generate_settings_files():
                                     if v is None:
                                         item[k] = ""
                     set_nested(property_settings, field, value)
-        
+
         # Update metadata timestamp
         property_settings["metadata"]["created_at"] = datetime.datetime.now().isoformat()
-        
+
         # Save property settings
         with open(property_settings_file, 'w', encoding='utf-8') as f:
             json.dump(property_settings, f, indent=2)
-            
+
         property_count += 1
-        
+
         # Create/update tenant settings files for this property
         for tenant in tenants_by_property.get(property_id, []):
             tenant_id = tenant.get('Tenant ID')
             if tenant_id is None:  # Skip if tenant_id is None
                 continue
-            
+
             # Get CAM data if available - but we'll only use it for new tenants
             # or when specific fields aren't already set in existing tenant settings
             cam_data = tenant_cam_lookup.get(tenant_id, {})
@@ -884,10 +884,10 @@ def generate_settings_files():
             stop_amount = cam_data.get('STOP', '')
             min_increase = cam_data.get('MININCR', '')
             max_increase = cam_data.get('MAXINCR', '')
-                
+
             # Get property total RSF
             property_total_rsf = property_data.get('Total RSF', 0)
-            
+
             # Default tenant settings template with examples and explanations
             default_tenant_settings = {
                 "tenant_id": tenant_id,
@@ -908,7 +908,7 @@ def generate_settings_files():
                     }
                 },
                 # Capital expenses that can be amortized over time
-                "property_capital_expenses": [
+                "capital_expenses": [
                     {
                         "id": "",
                         "description": "",

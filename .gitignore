@@ -1,7 +1,7 @@
 # Data directories
-/Data/
-/Input/
-/Output/
+Data/
+Input/
+Output/
 
 # Python files
 __pycache__/

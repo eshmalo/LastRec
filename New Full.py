@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Unified CAM Reconciliation Calculator
+Enhanced CAM Reconciliation Calculator
 
-This script provides a streamlined, linear approach to CAM reconciliation calculations.
-It maintains compatibility with the existing data structure while simplifying the
-calculation flow and standardizing decimal handling.
+This script provides a streamlined, linear approach to CAM reconciliation calculations
+with enhanced payment tracking and balance calculation features.
+
+Enhancements:
+  - Tracking of actual tenant payments during the reconciliation period
+  - Calculation of reconciliation year balance (expected - paid)
+  - Support for catch-up period calculations
+  - Tracking of total balances (reconciliation + catch-up)
 
 Usage:
-  python unified_cam_reconciliation.py --property_id PROPERTY_ID --recon_year YEAR [--tenant_id TENANT_ID] [--last_bill YYYYMM] [--output_dir OUTPUT_DIR]
+  python enhanced_cam_reconciliation.py --property_id PROPERTY_ID --recon_year YEAR [--tenant_id TENANT_ID] [--last_bill YYYYMM] [--output_dir OUTPUT_DIR]
 
 Example:
-  python unified_cam_reconciliation.py --property_id WAT --recon_year 2024 --tenant_id 1330
+  python enhanced_cam_reconciliation.py --property_id WAT --recon_year 2024 --tenant_id 1330
 """
 
 import os
@@ -35,7 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join('Output', 'unified_cam_reconciliation.log')),
+        logging.FileHandler(os.path.join('Output', 'enhanced_cam_reconciliation.log')),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -732,31 +737,16 @@ def filter_gl_accounts(
                 # Account is included in GROSS and not excluded - add to NET
                 net_entries[category].append(processed_transaction)
 
-            # Handle base and cap categories for CAM and RET
+            # Add to base category for both CAM and RET
             if category in ['cam', 'ret']:
-                # Always add to base and cap GROSS
+                # Always add to base GROSS
                 gross_entries['base'].append(processed_transaction)
                 gross_amounts['base'] += net_amount
                 included_accounts['base'].add(gl_account)
 
-                gross_entries['cap'].append(processed_transaction)
-                gross_amounts['cap'] += net_amount
-                included_accounts['cap'].add(gl_account)
-
                 # Check base exclusions
                 base_exclusions = exclusions.get('base', [])
-                is_base_excluded = False
-                for exclusion in base_exclusions:
-                    if '-' in exclusion:
-                        if is_in_range(gl_account, exclusion):
-                            is_base_excluded = True
-                            break
-                    else:
-                        clean_exclusion = exclusion.replace('MR', '')
-                        clean_account = gl_account.replace('MR', '')
-                        if clean_exclusion == clean_account:
-                            is_base_excluded = True
-                            break
+                is_base_excluded = check_account_exclusion(gl_account, base_exclusions)
 
                 if is_base_excluded:
                     exclusion_entries['base'].append(processed_transaction)
@@ -765,20 +755,16 @@ def filter_gl_accounts(
                 else:
                     net_entries['base'].append(processed_transaction)
 
+            # Add to cap category ONLY for CAM (not RET)
+            if category == 'cam':
+                # Add to cap GROSS
+                gross_entries['cap'].append(processed_transaction)
+                gross_amounts['cap'] += net_amount
+                included_accounts['cap'].add(gl_account)
+
                 # Check cap exclusions
                 cap_exclusions = exclusions.get('cap', [])
-                is_cap_excluded = False
-                for exclusion in cap_exclusions:
-                    if '-' in exclusion:
-                        if is_in_range(gl_account, exclusion):
-                            is_cap_excluded = True
-                            break
-                    else:
-                        clean_exclusion = exclusion.replace('MR', '')
-                        clean_account = gl_account.replace('MR', '')
-                        if clean_exclusion == clean_account:
-                            is_cap_excluded = True
-                            break
+                is_cap_excluded = check_account_exclusion(gl_account, cap_exclusions)
 
                 if is_cap_excluded:
                     exclusion_entries['cap'].append(processed_transaction)
@@ -1031,13 +1017,14 @@ def calculate_base_year_adjustment(
     # Check if base year adjustment applies
     applies = is_base_year_applicable(recon_year, base_year_setting)
 
-    # If base year doesn't apply, return full amount
+    # If base year doesn't apply, no adjustment needed
     if not applies:
         logger.info("Base year adjustment does not apply")
         return {
             'base_year_applies': False,
             'base_year': None,
             'base_year_amount': Decimal('0'),
+            'base_year_adjustment': Decimal('0'),
             'total_before_adjustment': base_year_total,
             'after_base_adjustment': base_year_total
         }
@@ -1046,17 +1033,21 @@ def calculate_base_year_adjustment(
     base_year_amount_str = settings.get('settings', {}).get('base_year_amount', '0')
     base_amount = to_decimal(base_year_amount_str)
 
-    # Calculate amount after base year adjustment (never less than zero)
-    after_base = max(Decimal('0'), base_year_total - base_amount)
+    # Calculate the base year adjustment (never deduct more than the base amount or what's available)
+    base_year_adjustment = min(base_amount, base_year_total)
+
+    # Calculate amount after base year adjustment
+    after_base = base_year_total - base_year_adjustment
 
     # Log the calculation
     logger.info(
-        f"Base year adjustment: {float(base_year_total):.2f} - {float(base_amount):.2f} = {float(after_base):.2f}")
+        f"Base year adjustment: {float(base_year_total):.2f} - {float(base_year_adjustment):.2f} = {float(after_base):.2f}")
 
     return {
         'base_year_applies': True,
         'base_year': base_year_setting,
         'base_year_amount': base_amount,
+        'base_year_adjustment': base_year_adjustment,
         'total_before_adjustment': base_year_total,
         'after_base_adjustment': after_base
     }
@@ -1137,6 +1128,7 @@ def calculate_cap_limit(
 
     # Get cap percentage
     cap_percentage_str = cap_settings.get('cap_percentage', '0')
+    # Make sure to handle case where cap_percentage might be a non-string/non-number
     cap_percentage = to_decimal(cap_percentage_str)
 
     # Get cap type
@@ -1222,65 +1214,76 @@ def calculate_cap_limit(
     return result
 
 
-def enforce_cap(
+def determine_cap_eligible_amount(
+        gl_filtered_data: Dict[str, Any],
+        tenant_cam_tax_admin: Dict[str, Any]
+) -> Decimal:
+    """Determine the amount that is eligible for cap calculations."""
+    # The cap-eligible amount is the net amount for all GL accounts included in cap
+    cap_eligible_net = gl_filtered_data['net_amounts'].get('cap', Decimal('0'))
+
+    # Add admin fee if it's included in cap
+    if tenant_cam_tax_admin.get('include_admin_in_cap', False):
+        cap_eligible_net += tenant_cam_tax_admin.get('admin_fee_net', Decimal('0'))
+
+    logger.info(f"Cap eligible amount: {float(cap_eligible_net):.2f}")
+    return cap_eligible_net
+
+
+def calculate_cap_deduction(
         tenant_id: str,
         recon_year: int,
-        after_base_amount: Decimal,
-        subject_to_cap_amount: Decimal,
-        excluded_from_cap_amount: Decimal,
+        cap_eligible_amount: Decimal,
         settings: Dict[str, Any],
         cap_history: Dict[str, Dict[str, float]]
 ) -> Dict[str, Any]:
-    """Enforce cap limits on the reconciliation amount."""
-    # Calculate cap limit
+    """Calculate cap deduction amount (if any)."""
+    # Get cap limit
     cap_limit_results = calculate_cap_limit(tenant_id, recon_year, settings, cap_history)
 
-    # Determine if cap applies (only if we have a reference amount)
+    # Determine if cap applies
     cap_applies = cap_limit_results.get('reference_amount', Decimal('0')) > 0
 
-    # Log cap settings for debugging
-    logger.info(f"Tenant {tenant_id} cap settings:")
-    logger.info(f"  Reference amount: {float(cap_limit_results.get('reference_amount', Decimal('0'))):.2f}")
-    logger.info(f"  Cap applies: {cap_applies}")
-    logger.info(f"  Amount subject to cap: {float(subject_to_cap_amount):.2f}")
-    logger.info(f"  Excluded amount: {float(excluded_from_cap_amount):.2f}")
-    logger.info(f"  Cap limit: {float(cap_limit_results.get('effective_cap_limit', Decimal('0'))):.2f}")
+    if not cap_applies:
+        logger.info(f"Cap does not apply for tenant {tenant_id}")
+        return {
+            'cap_applies': False,
+            'cap_limit': Decimal('0'),
+            'cap_eligible_amount': cap_eligible_amount,
+            'cap_deduction': Decimal('0'),
+            'net_after_cap': cap_eligible_amount,
+            'cap_limit_results': cap_limit_results
+        }
 
-    # Apply cap limits ONLY to the amount subject to cap
-    capped_subject_amount = subject_to_cap_amount
-    cap_limited = False
+    cap_limit = cap_limit_results.get('effective_cap_limit', Decimal('0'))
 
-    if cap_applies and subject_to_cap_amount > cap_limit_results.get('effective_cap_limit', Decimal('0')):
-        capped_subject_amount = cap_limit_results.get('effective_cap_limit', Decimal('0'))
-        cap_limited = True
-        logger.info(
-            f"Cap limit applied: {float(subject_to_cap_amount):.2f} reduced to {float(capped_subject_amount):.2f}")
+    # Calculate deduction (only if eligible amount exceeds cap)
+    cap_deduction = Decimal('0')
+    if cap_eligible_amount > cap_limit:
+        cap_deduction = cap_eligible_amount - cap_limit
+        logger.info(f"Cap limit applied: {float(cap_eligible_amount):.2f} exceeds cap of {float(cap_limit):.2f}")
+        logger.info(f"Cap deduction: {float(cap_deduction):.2f}")
 
-    # Calculate final amount by adding back excluded amounts
-    final_capped_amount = capped_subject_amount + excluded_from_cap_amount
+    # Calculate net amount after cap
+    net_after_cap = cap_eligible_amount - cap_deduction
 
-    logger.info(
-        f"Final capped amount: {float(final_capped_amount):.2f} = {float(capped_subject_amount):.2f} (capped) + {float(excluded_from_cap_amount):.2f} (excluded)")
-
-    # Return comprehensive results
     return {
         'cap_applies': cap_applies,
-        'amount_subject_to_cap': subject_to_cap_amount,
-        'excluded_amount': excluded_from_cap_amount,
-        'cap_limit_results': cap_limit_results,
-        'capped_subject_amount': capped_subject_amount,
-        'final_capped_amount': final_capped_amount,
-        'cap_limited': cap_limited
+        'cap_limit': cap_limit,
+        'cap_eligible_amount': cap_eligible_amount,
+        'cap_deduction': cap_deduction,
+        'net_after_cap': net_after_cap,
+        'cap_limit_results': cap_limit_results
     }
 
 
 def update_cap_history(
         tenant_id: str,
         recon_year: int,
-        amount: Decimal,
+        cap_eligible_amount: Decimal,
         cap_history: Dict[str, Dict[str, float]] = None
 ) -> Dict[str, Dict[str, float]]:
-    """Update cap history with the new amount for the current reconciliation."""
+    """Update cap history with the cap-eligible amount for the current reconciliation."""
     # Load cap history if not provided
     if cap_history is None:
         cap_history = load_cap_history()
@@ -1293,9 +1296,10 @@ def update_cap_history(
     if tenant_id_str not in cap_history:
         cap_history[tenant_id_str] = {}
 
-    # Update the entry
-    cap_history[tenant_id_str][recon_year_str] = float(amount)
-    logger.info(f"Updated cap history for tenant {tenant_id}, year {recon_year}: {float(amount):.2f}")
+    # Update the entry with the cap-eligible amount (not the final billing amount)
+    # This ensures caps are based on what would have been charged without the cap
+    cap_history[tenant_id_str][recon_year_str] = float(cap_eligible_amount)
+    logger.info(f"Updated cap history for tenant {tenant_id}, year {recon_year}: {float(cap_eligible_amount):.2f}")
 
     # Save the updated cap history
     save_cap_history(cap_history)
@@ -1638,6 +1642,76 @@ def get_old_monthly_payment(tenant_id: str, property_id: str) -> Decimal:
     return Decimal('0')
 
 
+def get_tenant_payments(
+        tenant_id: str,
+        property_id: str,
+        periods: List[str],
+        income_categories: List[str] = None
+) -> Dict[str, Any]:
+    """Get all payments made by a tenant during specific periods."""
+    # Load tenant CAM data
+    tenant_cam_data = load_json(TENANT_CAM_DATA_PATH)
+
+    # Convert tenant_id to string for comparison
+    tenant_id_str = str(tenant_id)
+
+    # Initialize payments dictionary
+    payments = {
+        'total': Decimal('0'),
+        'by_period': {},
+        'by_category': {}
+    }
+
+    # Find payments for this tenant and property
+    for record in tenant_cam_data:
+        record_tenant_id = str(record.get('TenantID', ''))
+        record_property_id = record.get('PropertyID', '')
+        income_category = record.get('IncomeCategory', '')
+
+        # Filter by income category if specified
+        if income_categories and income_category not in income_categories:
+            continue
+
+        if record_tenant_id == tenant_id_str and record_property_id == property_id:
+            # Extract the period from BillingMonth (e.g., "2024-05" -> "202405")
+            billing_month = record.get('BillingMonth', '')
+            if billing_month:
+                try:
+                    # Convert from YYYY-MM to YYYYMM format
+                    parts = billing_month.split('-')
+                    if len(parts) == 2:
+                        period = f"{parts[0]}{parts[1]}"
+
+                        # Check if this period is in our list of periods
+                        if period in periods:
+                            # Get the MatchedEstimate value (what was billed)
+                            matched_estimate = record.get('MatchedEstimate', '')
+
+                            if matched_estimate and matched_estimate != '':
+                                amount = to_decimal(matched_estimate)
+
+                                # Add to total
+                                payments['total'] += amount
+
+                                # Add to by_period
+                                if period not in payments['by_period']:
+                                    payments['by_period'][period] = Decimal('0')
+                                payments['by_period'][period] += amount
+
+                                # Add to by_category
+                                if income_category not in payments['by_category']:
+                                    payments['by_category'][income_category] = Decimal('0')
+                                payments['by_category'][income_category] += amount
+
+                                logger.debug(
+                                    f"Found payment for tenant {tenant_id}, period {period}, category {income_category}: {float(amount):.2f}")
+                except Exception as e:
+                    logger.warning(f"Error processing billing month {billing_month}: {str(e)}")
+
+    logger.info(f"Total payments for tenant {tenant_id} over {len(periods)} periods: {float(payments['total']):.2f}")
+    return payments
+
+
 def calculate_new_monthly_payment(
         final_amount: Decimal,
         periods_count: int = 12
@@ -1734,9 +1808,9 @@ def generate_csv_report(
         'total_before_base_adjustment', 'base_year_adjustment', 'after_base_adjustment',
 
         # Cap details
-        'cap_reference_amount', 'cap_percentage', 'cap_limit',
-        'amount_subject_to_cap', 'excluded_from_cap', 'capped_subject_amount',
-        'cap_limited', 'after_cap_amount',
+        'cap_applies', 'cap_type', 'cap_reference_amount', 'cap_percentage',
+        'cap_limit', 'cap_eligible_amount', 'cap_deduction',
+        'after_cap_adjustment',
 
         # Property total before tenant prorations
         'property_total_before_prorations',
@@ -1756,7 +1830,12 @@ def generate_csv_report(
 
         # Payment tracking
         'old_monthly', 'new_monthly', 'monthly_difference',
-        'percentage_change', 'change_type', 'is_significant'
+        'percentage_change', 'change_type', 'is_significant',
+
+        # Enhanced payment tracking and balance calculation
+        'reconciliation_periods', 'reconciliation_expected', 'reconciliation_paid', 'reconciliation_balance',
+        'catchup_periods', 'catchup_monthly', 'catchup_expected', 'catchup_paid', 'catchup_balance',
+        'total_balance'
     ]
 
     # Write the CSV file
@@ -1856,6 +1935,7 @@ def calculate_tenant_reconciliation(
     # STEP 2: Load and filter GL data
     gl_data = load_gl_data(property_id)
     recon_periods = periods_dict['recon_periods']
+    catchup_periods = periods_dict['catchup_periods']
 
     # Enhanced filtering with detailed tracking
     gl_filtered_data = filter_gl_accounts(gl_data, settings, recon_periods, categories)
@@ -1869,43 +1949,32 @@ def calculate_tenant_reconciliation(
     # STEP 5: Apply base year adjustment
     base_year_result = calculate_base_year_adjustment(
         recon_year,
-        tenant_cam_tax_admin['base_net_total'],
+        tenant_cam_tax_admin['base_net_total'],  # This already accounts for admin fee inclusion
         settings
     )
 
     # Store the amount before and after base year adjustment
     before_base_amount = tenant_cam_tax_admin['base_net_total']
-    base_year_adjustment = Decimal('0')
-
-    if base_year_result['base_year_applies']:
-        base_year_adjustment = base_year_result['base_year_amount']
-
+    base_year_adjustment = base_year_result['base_year_adjustment']
     after_base_amount = base_year_result['after_base_adjustment']
 
-    # STEP 6: Prepare amounts for cap calculation
-    # The cap subject amount is the total after base year adjustment
-    # but we need to separate what's subject to cap vs excluded from cap
-    amount_subject_to_cap = tenant_cam_tax_admin['cap_net_total']
+    # STEP 6: Calculate cap-eligible amount
+    cap_eligible_amount = determine_cap_eligible_amount(gl_filtered_data, tenant_cam_tax_admin)
 
-    # Calculate the excluded from cap amount (what should be added back after capping)
-    # This is the difference between the base net total and cap net total
-    excluded_from_cap_amount = after_base_amount - amount_subject_to_cap
-
-    # STEP 7: Apply cap limits
+    # STEP 7: Apply cap limits and calculate deduction
     cap_history = load_cap_history()
 
-    cap_result = enforce_cap(
+    cap_result = calculate_cap_deduction(
         tenant_id,
         recon_year,
-        after_base_amount,
-        amount_subject_to_cap,
-        excluded_from_cap_amount,
+        cap_eligible_amount,
         settings,
         cap_history
     )
 
-    # After applying caps, get the result
-    after_cap_amount = cap_result['final_capped_amount']
+    # Calculate the amount after cap adjustment (apply cap deduction)
+    after_cap_amount = after_base_amount - cap_result['cap_deduction']
+    logger.info(f"Amount after cap adjustment: {float(after_cap_amount):.2f}")
 
     # STEP 8: Calculate capital expenses
     capital_expenses_result = calculate_capital_expenses(settings, recon_year, recon_periods)
@@ -1955,7 +2024,9 @@ def calculate_tenant_reconciliation(
 
     # STEP 13: Update cap history unless skipped
     if not skip_cap_update:
-        cap_history = update_cap_history(tenant_id, recon_year, base_billing)
+        # Update with eligible amount (not final billing)
+        # This is the correct approach for cap history
+        cap_history = update_cap_history(tenant_id, recon_year, cap_eligible_amount)
 
     # STEP 14: Calculate payment tracking information
     old_monthly = get_old_monthly_payment(tenant_id, property_id)
@@ -1963,7 +2034,50 @@ def calculate_tenant_reconciliation(
     new_monthly = calculate_new_monthly_payment(final_billing, recon_period_count)
     payment_change = calculate_payment_change(old_monthly, new_monthly)
 
-    # STEP 15: Create a detailed report row with enhanced fields
+    # STEP 15: ENHANCED PAYMENT TRACKING - Calculate actual payments and balances
+    # Define relevant income categories for CAM charges
+    # You may need to adjust these based on your data structure
+    cam_income_categories = ['CAM', 'OPX', 'EXP', 'RNT', 'PRK']  # Example categories
+
+    # Get tenant payments for reconciliation year
+    recon_payments = get_tenant_payments(tenant_id, property_id, recon_periods, cam_income_categories)
+    recon_paid = recon_payments['total']
+
+    # Calculate reconciliation year balance
+    recon_balance = final_billing - recon_paid
+    logger.info(
+        f"Reconciliation year balance: {float(final_billing):.2f} - {float(recon_paid):.2f} = {float(recon_balance):.2f}")
+
+    # Calculate monthly amount from reconciliation for catch-up
+    monthly_amount = Decimal('0')
+    if recon_periods:
+        monthly_amount = final_billing / Decimal(len(recon_periods))
+
+    # Calculate expected catch-up payment
+    catchup_expected = Decimal('0')
+    if catchup_periods:
+        catchup_expected = monthly_amount * Decimal(len(catchup_periods))
+        logger.info(
+            f"Catch-up expected: {float(monthly_amount):.2f} × {len(catchup_periods)} = {float(catchup_expected):.2f}")
+
+    # Get actual catch-up payments
+    catchup_paid = Decimal('0')
+    if catchup_periods:
+        catchup_payment_data = get_tenant_payments(tenant_id, property_id, catchup_periods, cam_income_categories)
+        catchup_paid = catchup_payment_data['total']
+        logger.info(f"Catch-up paid: {float(catchup_paid):.2f}")
+
+    # Calculate catch-up balance
+    catchup_balance = catchup_expected - catchup_paid
+    logger.info(
+        f"Catch-up balance: {float(catchup_expected):.2f} - {float(catchup_paid):.2f} = {float(catchup_balance):.2f}")
+
+    # Calculate total balance
+    total_balance = recon_balance + catchup_balance
+    logger.info(
+        f"Total balance: {float(recon_balance):.2f} + {float(catchup_balance):.2f} = {float(total_balance):.2f}")
+
+    # STEP 16: Create a detailed report row with enhanced fields
     share_method = settings.get('settings', {}).get('prorate_share_method', 'RSF')
 
     # Count full/partial months
@@ -2018,14 +2132,18 @@ def calculate_tenant_reconciliation(
         'after_base_adjustment': format_currency(after_base_amount),
 
         # Cap details
-        'cap_reference_amount': format_currency(cap_result['cap_limit_results']['reference_amount']),
-        'cap_percentage': format_percentage(cap_result['cap_limit_results']['cap_percentage'] * Decimal('100'), 2),
-        'cap_limit': format_currency(cap_result['cap_limit_results']['effective_cap_limit']),
-        'amount_subject_to_cap': format_currency(cap_result['amount_subject_to_cap']),
-        'excluded_from_cap': format_currency(cap_result['excluded_amount']),
-        'capped_subject_amount': format_currency(cap_result['capped_subject_amount']),
-        'cap_limited': 'Yes' if cap_result['cap_limited'] else 'No',
-        'after_cap_amount': format_currency(after_cap_amount),
+        'cap_applies': 'Yes' if cap_result['cap_applies'] else 'No',
+        'cap_type': settings.get('settings', {}).get('cap_settings', {}).get('cap_type', 'previous_year'),
+        'cap_reference_amount': format_currency(
+            cap_result.get('cap_limit_results', {}).get('reference_amount', Decimal('0'))),
+        'cap_percentage': format_percentage(
+            to_decimal(settings.get('settings', {}).get('cap_settings', {}).get('cap_percentage', '0')) * Decimal(
+                '100'),
+            2),
+        'cap_limit': format_currency(cap_result['cap_limit']),
+        'cap_eligible_amount': format_currency(cap_result['cap_eligible_amount']),
+        'cap_deduction': format_currency(cap_result['cap_deduction']),
+        'after_cap_adjustment': format_currency(after_cap_amount),
 
         # Property total before tenant prorations
         'property_total_before_prorations': format_currency(property_total_after_adjustments),
@@ -2057,7 +2175,21 @@ def calculate_tenant_reconciliation(
         'monthly_difference': format_currency(payment_change['difference']),
         'percentage_change': format_percentage(payment_change['percentage_change'], 1),
         'change_type': payment_change['change_type'],
-        'is_significant': 'Yes' if payment_change['is_significant'] else 'No'
+        'is_significant': 'Yes' if payment_change['is_significant'] else 'No',
+
+        # ENHANCED - Payment and balance tracking fields
+        'reconciliation_periods': len(recon_periods),
+        'reconciliation_expected': format_currency(final_billing),
+        'reconciliation_paid': format_currency(recon_paid),
+        'reconciliation_balance': format_currency(recon_balance),
+
+        'catchup_periods': len(catchup_periods) if catchup_periods else 0,
+        'catchup_monthly': format_currency(monthly_amount),
+        'catchup_expected': format_currency(catchup_expected),
+        'catchup_paid': format_currency(catchup_paid),
+        'catchup_balance': format_currency(catchup_balance),
+
+        'total_balance': format_currency(total_balance),
     }
 
     # Return comprehensive results
@@ -2090,6 +2222,18 @@ def calculate_tenant_reconciliation(
         'old_monthly': old_monthly,
         'new_monthly': new_monthly,
         'payment_change': payment_change,
+
+        # ENHANCED - Payment and balance tracking
+        'payment_tracking': {
+            'recon_paid': recon_paid,
+            'recon_balance': recon_balance,
+            'catchup_expected': catchup_expected,
+            'catchup_paid': catchup_paid,
+            'catchup_balance': catchup_balance,
+            'total_balance': total_balance,
+            'recon_payments_detail': recon_payments,
+            'catchup_payments_detail': catchup_payment_data if catchup_periods else None
+        },
 
         # Enhanced report row for CSV export
         'report_row': report_row
@@ -2158,7 +2302,7 @@ def process_property_reconciliation(
 
 def main():
     """Main entry point for the reconciliation process."""
-    parser = argparse.ArgumentParser(description='Unified CAM Reconciliation Calculator')
+    parser = argparse.ArgumentParser(description='Enhanced CAM Reconciliation Calculator')
 
     parser.add_argument(
         '--property_id',
