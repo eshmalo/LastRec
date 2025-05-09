@@ -66,7 +66,7 @@ def save_json(file_path: str, data: Any, indent: int = 2) -> bool:
 
 def is_in_range(gl_account: str, account_range: str) -> bool:
     """
-    Check if a GL account is within the specified range.
+    Check if a GL account is within the specified range using numeric comparison.
     
     Args:
         gl_account: GL account number to check
@@ -83,7 +83,19 @@ def is_in_range(gl_account: str, account_range: str) -> bool:
         clean_start = start.replace('MR', '')
         clean_end = end.replace('MR', '')
         
-        return clean_start <= clean_account <= clean_end
+        # Convert to integers for numeric comparison
+        # Handle case where account might contain non-numeric characters
+        try:
+            numeric_account = int(clean_account)
+            numeric_start = int(clean_start)
+            numeric_end = int(clean_end)
+            
+            return numeric_start <= numeric_account <= numeric_end
+        except ValueError:
+            # If conversion fails, fall back to string comparison with warning
+            logger.warning(f"Non-numeric GL account detected: {gl_account}. Using string comparison as fallback.")
+            return clean_start <= clean_account <= clean_end
+            
     except (ValueError, AttributeError):
         logger.error(f"Invalid account range format: {account_range}")
         return False

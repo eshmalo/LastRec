@@ -44,6 +44,28 @@ def calculate_tenant_share(
     Returns:
         Tenant's share of recoverable amount
     """
+    # Extract tenant's CAM/TAX/admin_fee from property_recoverable if it's a dictionary
+    if isinstance(property_recoverable, dict) and 'cam_tax_admin_results' in property_recoverable:
+        cam_tax_admin_results = property_recoverable.get('cam_tax_admin_results', {})
+        if cam_tax_admin_results:
+            # We have detailed CAM/TAX/admin results - calculate share directly
+            cam_total = cam_tax_admin_results.get('cam_total', Decimal('0'))
+            admin_fee_amount = cam_tax_admin_results.get('admin_fee_amount', Decimal('0'))
+            
+            # Get share percentage
+            share_percentage = get_tenant_share_percentage(tenant_settings, property_settings)
+            
+            # Calculate tenant's share of CAM and admin fee
+            tenant_cam_share = cam_total * share_percentage
+            tenant_admin_share = admin_fee_amount * share_percentage
+            
+            # Combined total is the tenant's CAM share plus admin fee share
+            tenant_share = tenant_cam_share + tenant_admin_share
+            logger.info(f"Using detailed calculation: tenant_cam_share={tenant_cam_share}, tenant_admin_share={tenant_admin_share}, total={tenant_share}")
+            
+            return tenant_share
+    
+    # Fall back to simple calculation if we don't have detailed results
     # Extract the recoverable amount if property_recoverable is a dictionary
     if isinstance(property_recoverable, dict):
         recoverable_amount = property_recoverable.get('final_recoverable_amount', Decimal('0'))
@@ -52,7 +74,31 @@ def calculate_tenant_share(
         recoverable_amount = property_recoverable
         logger.info(f"Using direct recoverable amount: {recoverable_amount}")
     
-    # Get tenant's share percentage
+    # Calculate share percentage
+    share_percentage = get_tenant_share_percentage(tenant_settings, property_settings)
+    
+    # Apply share percentage to recoverable amount
+    tenant_share = recoverable_amount * share_percentage
+    logger.info(f"Using simple calculation: share_percentage={share_percentage}, recoverable_amount={recoverable_amount}, tenant_share={tenant_share}")
+    
+    return tenant_share
+
+
+def get_tenant_share_percentage(
+    tenant_settings: Dict[str, Any],
+    property_settings: Dict[str, Any]
+) -> Decimal:
+    """
+    Calculate tenant's share percentage based on share method.
+    
+    Args:
+        tenant_settings: Tenant settings dictionary
+        property_settings: Property settings dictionary
+        
+    Returns:
+        Tenant's share percentage as a decimal (e.g., 0.05 for 5%)
+    """
+    # Get tenant's share method
     share_method = tenant_settings.get('settings', {}).get('prorate_share_method', '')
     
     # Fixed share percentage
@@ -70,9 +116,8 @@ def calculate_tenant_share(
                 
             # Convert from percentage (e.g., 5.138) to decimal (0.05138)
             fixed_share = Decimal(fixed_share_str) / Decimal('100')
-            tenant_share = recoverable_amount * fixed_share
-            logger.info(f"Using fixed share percentage: {fixed_share_str}% - tenant_share={tenant_share}, recoverable_amount={recoverable_amount}")
-            return tenant_share
+            logger.info(f"Using fixed share percentage: {fixed_share_str}% = {fixed_share}")
+            return fixed_share
         except (ValueError, TypeError, decimal.InvalidOperation) as e:
             logger.error(f"Invalid fixed share percentage: {fixed_share_str}. Error: {str(e)}")
             # Fall back to RSF calculation below
@@ -87,9 +132,8 @@ def calculate_tenant_share(
         
         if property_sf > 0:
             share_pct = tenant_sf / property_sf
-            tenant_share = recoverable_amount * share_pct
             logger.info(f"Using RSF-based share: {tenant_sf}/{property_sf} = {share_pct}")
-            return tenant_share
+            return share_pct
         else:
             logger.error("Property square footage is zero or invalid")
             return Decimal('0')
@@ -549,8 +593,9 @@ def generate_report_row(billing_result: Dict[str, Any], tenant_settings: Optiona
         # Use the global property_gl_totals
         cam_total = generate_report_row.property_gl_totals.get('cam_total', Decimal('0'))
         ret_total = generate_report_row.property_gl_totals.get('ret_total', Decimal('0'))
+        admin_fee_base = generate_report_row.property_gl_totals.get('admin_fee_base', Decimal('0'))
         property_gl_total = cam_total + ret_total
-        logger.info(f"Using global property_gl_totals: CAM={cam_total}, RET={ret_total}, Total={property_gl_total}")
+        logger.info(f"Using global property_gl_totals: CAM={cam_total}, RET={ret_total}, admin_fee_base={admin_fee_base}, Total={property_gl_total}")
     # Otherwise fall back to GL data
     elif 'gl_data' in billing_result and 'totals' in billing_result.get('gl_data', {}):
         # Fallback to gl_data (for backward compatibility)
@@ -558,6 +603,14 @@ def generate_report_row(billing_result: Dict[str, Any], tenant_settings: Optiona
         ret_total = billing_result['gl_data']['totals'].get('ret_total', Decimal('0'))
         property_gl_total = cam_total + ret_total
         logger.info(f"Using gl_data: CAM={cam_total}, RET={ret_total}, Total={property_gl_total}")
+    
+    # Get admin fee percentage in decimal format (e.g., 0.15 for 15%)
+    admin_fee_percentage = billing_result.get('cam_tax_admin_results', {}).get('admin_fee_percentage', Decimal('0'))
+    if not admin_fee_percentage:
+        admin_fee_percentage = Decimal(str(settings.get('settings', {}).get('admin_fee_percentage', '0') or '0'))
+        # Convert from percentage to decimal if needed
+        if admin_fee_percentage > Decimal('1'):
+            admin_fee_percentage = admin_fee_percentage / Decimal('100')
     
     # Format row data with comprehensive breakdown focusing on tenant-specific values
     result = {
@@ -580,13 +633,14 @@ def generate_report_row(billing_result: Dict[str, Any], tenant_settings: Optiona
         # Tenant expense breakdown
         'cam_total': format_currency(billing_result.get('tenant_share_base', Decimal('0'))),
         'ret_total': format_currency(Decimal('0')),  # Zero for CAM-only reconciliation
-        
-        # Get admin fee data directly from billing_result's cam_tax_admin_results if present
         'admin_fee_base': format_currency(
-            billing_result.get('cam_tax_admin_results', {}).get('admin_fee_base', Decimal('0')) * share_percentage
+            property_gl_total  # This is the total property GL amount
         ),
         'admin_fee': format_currency(
-            billing_result.get('cam_tax_admin_results', {}).get('admin_fee_amount', Decimal('0')) * share_percentage
+            property_gl_total * admin_fee_percentage  # Property total × admin fee %
+        ),
+        'tenant_admin_fee': format_currency(
+            property_gl_total * admin_fee_percentage * share_percentage  # Tenant's share of property admin fee
         ),
         'admin_fee_percentage': (
             f"{float(billing_result.get('cam_tax_admin_results', {}).get('admin_fee_percentage', Decimal('0'))) * 100:.1f}%" 
@@ -693,8 +747,8 @@ def generate_csv_report(
         'property_gl_total',
         
         # Tenant expense breakdown
-        'cam_total', 'ret_total', 'admin_fee_base', 'admin_fee', 
-        'admin_fee_percentage', 'recoverable_subtotal',
+        'cam_total', 'ret_total', 'admin_fee_base', 'admin_fee',
+        'tenant_admin_fee', 'admin_fee_percentage', 'recoverable_subtotal',
         
         # Base year details
         'base_year', 'base_year_amount', 
@@ -897,11 +951,12 @@ def generate_reports(
         # Add property GL totals to the billing result
         property_gl_totals_dict = {
             'cam_total': prop_recoverable_dict.get('property_gl_totals', {}).get('cam_total', Decimal('0')), 
-            'ret_total': prop_recoverable_dict.get('property_gl_totals', {}).get('ret_total', Decimal('0'))
+            'ret_total': prop_recoverable_dict.get('property_gl_totals', {}).get('ret_total', Decimal('0')),
+            'admin_fee_base': prop_recoverable_dict.get('property_gl_totals', {}).get('admin_fee_base', Decimal('0'))
         }
         
         # Log what we're actually storing
-        logger.info(f"Property GL totals from property_recoverable: CAM={property_gl_totals_dict['cam_total']}, RET={property_gl_totals_dict['ret_total']}")
+        logger.info(f"Property GL totals from property_recoverable: CAM={property_gl_totals_dict['cam_total']}, RET={property_gl_totals_dict['ret_total']}, admin_fee_base={property_gl_totals_dict['admin_fee_base']}")
         
         billing_result['property_gl_totals'] = property_gl_totals_dict
         

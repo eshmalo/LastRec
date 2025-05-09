@@ -355,48 +355,6 @@ def filter_gl_entries(
     return result
 
 
-def calculate_admin_fee_base(
-    cam_entries: List[Dict[str, Any]], 
-    settings: Dict[str, Any]
-) -> Tuple[List[Dict[str, Any]], Decimal]:
-    """
-    Calculate the admin fee base based on filtered CAM entries.
-    
-    Args:
-        cam_entries: List of CAM transactions
-        settings: Settings dictionary with admin fee inclusions/exclusions
-        
-    Returns:
-        Tuple of (list of admin fee eligible transactions, total admin fee base amount)
-    """
-    gl_settings = settings.get('settings', {})
-    admin_inclusions = gl_settings.get('gl_inclusions', {}).get('admin_fee', [])
-    admin_exclusions = gl_settings.get('gl_exclusions', {}).get('admin_fee', [])
-    
-    # Log admin fee inclusions/exclusions for debugging
-    logger.info(f"Admin fee inclusions: {admin_inclusions}")
-    logger.info(f"Admin fee exclusions: {admin_exclusions}")
-    
-    admin_fee_transactions = []
-    admin_fee_base = Decimal('0')
-    
-    for transaction in cam_entries:
-        gl_account = transaction.get('GL Account', '')
-        
-        # Apply admin fee inclusion/exclusion rules
-        admin_included = is_included(gl_account, admin_inclusions, admin_exclusions)
-        
-        if admin_included:
-            admin_fee_transactions.append(transaction)
-            admin_fee_base += transaction.get('Net Amount', Decimal('0'))
-        else:
-            # Log exclusions of specific accounts for debugging
-            if gl_account == 'MR700000' or gl_account.replace('MR', '') == '700000':
-                logger.info(f"MR700000 excluded from admin fee calculation")
-    
-    logger.info(f"Admin fee base: {admin_fee_base} from {len(admin_fee_transactions)} transactions")
-    
-    return admin_fee_transactions, admin_fee_base
 
 
 def load_and_filter_gl(
@@ -427,52 +385,24 @@ def load_and_filter_gl(
     # Filter and group GL entries
     filtered_gl = filter_gl_entries(gl_data, settings, recon_periods)
     
-    # Calculate admin fee base
-    admin_transactions, admin_fee_base = calculate_admin_fee_base(
-        filtered_gl['cam'], 
-        settings
-    )
-    
     # Calculate CAM and RET totals
     cam_total = sum(tx.get('Net Amount', Decimal('0')) for tx in filtered_gl['cam'])
     ret_total = sum(tx.get('Net Amount', Decimal('0')) for tx in filtered_gl['ret'])
     
     # Calculate admin fee amount
-    admin_fee_percentage_str = settings.get('settings', {}).get('admin_fee_percentage', '')
-    admin_fee_percentage = Decimal('0')
+    # Import our admin fee percentage calculator
+    from reconciliation.calculations.cam_tax_admin import calculate_admin_fee_percentage
+    admin_fee_percentage = calculate_admin_fee_percentage(settings)
+    admin_fee_amount = cam_total * admin_fee_percentage
     
-    # Only calculate admin fee if a percentage is explicitly set
-    if admin_fee_percentage_str and str(admin_fee_percentage_str).strip():
-        try:
-            # Make sure we have a proper decimal - handle percentage format
-            admin_fee_percentage_str = str(admin_fee_percentage_str).strip()
-            
-            # Remove % sign if present
-            if admin_fee_percentage_str.endswith('%'):
-                admin_fee_percentage_str = admin_fee_percentage_str[:-1]
-                
-            # Convert to decimal and handle percentage conversion
-            admin_fee_percentage = Decimal(admin_fee_percentage_str)
-            
-            # If it's a percentage like 15, convert to 0.15
-            if admin_fee_percentage > 1:
-                admin_fee_percentage = admin_fee_percentage / Decimal('100')
-                
-            logger.info(f"Using admin fee percentage: {admin_fee_percentage * 100}%")
-        except (ValueError, TypeError, decimal.InvalidOperation) as e:
-            logger.error(f"Invalid admin fee percentage: {admin_fee_percentage_str}, error: {str(e)}, using 0")
-            admin_fee_percentage = Decimal('0')
-    
-    admin_fee_amount = admin_fee_base * admin_fee_percentage
+    logger.info(f"Admin fee amount: {admin_fee_amount} ({admin_fee_percentage * 100}% of {cam_total})")
     
     # Return comprehensive result
     return {
         'filtered_gl': filtered_gl,
-        'admin_transactions': admin_transactions,
         'totals': {
             'cam_total': cam_total,
             'ret_total': ret_total,
-            'admin_fee_base': admin_fee_base,
             'admin_fee_amount': admin_fee_amount
         }
     }

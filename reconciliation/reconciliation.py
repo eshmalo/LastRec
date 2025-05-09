@@ -536,12 +536,31 @@ def process_property(
                 if admin_fee_percentage_str.endswith('%'):
                     admin_fee_percentage_str = admin_fee_percentage_str[:-1]
                     
-                # Convert to decimal and handle percentage conversion
+                # Handle common cases where decimal point is prefixed with a period
+                if admin_fee_percentage_str.startswith('.'):
+                    admin_fee_percentage_str = '0' + admin_fee_percentage_str
+                    
+                # Convert to decimal
                 admin_fee_percentage = Decimal(admin_fee_percentage_str)
                 
-                # If it's a percentage like 15, convert to 0.15
-                if admin_fee_percentage > 1:
+                # Now determine if it's in decimal format (0.15) or percentage format (15)
+                # If it's >= 1 and <= 100, assume it's a percentage (15%)
+                # If it's > 0 and < 1, assume it's already a decimal (0.15)
+                # If it's > 100, it's likely an error but we'll treat as percentage and log warning
+                
+                if admin_fee_percentage > Decimal('100'):
+                    logger.warning(f"Admin fee percentage unusually high: {admin_fee_percentage}. Treating as {admin_fee_percentage/100}%")
                     admin_fee_percentage = admin_fee_percentage / Decimal('100')
+                elif admin_fee_percentage >= Decimal('1') and admin_fee_percentage <= Decimal('100'):
+                    logger.info(f"Converting admin fee from percentage ({admin_fee_percentage}%) to decimal ({admin_fee_percentage/100})")
+                    admin_fee_percentage = admin_fee_percentage / Decimal('100')
+                elif admin_fee_percentage > Decimal('0') and admin_fee_percentage < Decimal('1'):
+                    logger.info(f"Admin fee appears to be already in decimal format: {admin_fee_percentage}")
+                    # Already in decimal format, no conversion needed
+                else:
+                    # Zero or negative value, log warning and treat as zero
+                    logger.warning(f"Invalid admin fee percentage: {admin_fee_percentage}. Must be positive. Using 0.")
+                    admin_fee_percentage = Decimal('0')
                 
                 # Calculate admin fee based on CAM total
                 admin_fee_amount = property_totals.get('cam_total', Decimal('0')) * admin_fee_percentage
@@ -576,6 +595,9 @@ def process_property(
         'cam_total': property_totals.get('cam_total', Decimal('0')),
         'ret_total': property_totals.get('ret_total', Decimal('0'))
     }
+    
+    # Log the property_gl_totals being stored
+    logger.info(f"Setting property_gl_totals on generate_report_row: {generate_report_row.property_gl_totals}")
     
     # Generate reports with complete data
     report_results = generate_reports(
