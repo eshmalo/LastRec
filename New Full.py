@@ -1575,7 +1575,11 @@ def get_tenant_override(
         tenant_id: str,
         property_id: str
 ) -> Dict[str, Any]:
-    """Get override information for a specific tenant and property."""
+    """Get override information for a specific tenant and property.
+
+    The override amount is treated as an adjustment that gets added to the calculated billing amount,
+    not as a replacement for the entire calculated amount.
+    """
     # Load all overrides
     overrides = load_manual_overrides()
     override_lookup = create_override_lookup(overrides)
@@ -1716,7 +1720,11 @@ def calculate_new_monthly_payment(
         final_amount: Decimal,
         periods_count: int = 12
 ) -> Decimal:
-    """Calculate the new monthly payment amount based on the total reconciliation amount."""
+    """Calculate the new monthly payment amount based on the reconciliation amount.
+
+    Note: This should use the base_billing amount that does NOT include the override amount.
+    The override amount is treated as a one-time adjustment and is not factored into monthly payments.
+    """
     if periods_count <= 0:
         logger.warning(f"Invalid periods_count: {periods_count}, using default of 12")
         periods_count = 12
@@ -1826,10 +1834,10 @@ def generate_csv_report(
         'subtotal_before_occupancy_adjustment', 'occupancy_adjusted_amount',
 
         # Final amounts
-        'base_billing', 'override_amount', 'final_billing',
+        'base_billing', 'override_amount', 'override_adjustment', 'final_billing',
 
         # Payment tracking
-        'old_monthly', 'new_monthly', 'monthly_difference',
+        'old_monthly', 'new_monthly', 'new_monthly_excludes_override', 'monthly_difference',
         'percentage_change', 'change_type', 'is_significant',
 
         # Enhanced payment tracking and balance calculation
@@ -2019,8 +2027,8 @@ def calculate_tenant_reconciliation(
     # Calculate final billing (with override if applicable)
     final_billing = base_billing
     if override_amount != 0:
-        logger.info(f"Applying override amount: {float(override_amount):.2f}")
-        final_billing = override_amount
+        logger.info(f"Applying override amount: {float(override_amount):.2f} as an addition to the billing")
+        final_billing = base_billing + override_amount
 
     # STEP 13: Update cap history unless skipped
     if not skip_cap_update:
@@ -2031,7 +2039,9 @@ def calculate_tenant_reconciliation(
     # STEP 14: Calculate payment tracking information
     old_monthly = get_old_monthly_payment(tenant_id, property_id)
     recon_period_count = len(recon_periods)
-    new_monthly = calculate_new_monthly_payment(final_billing, recon_period_count)
+
+    # Calculate new monthly without the override amount
+    new_monthly = calculate_new_monthly_payment(base_billing, recon_period_count)
     payment_change = calculate_payment_change(old_monthly, new_monthly)
 
     # STEP 15: ENHANCED PAYMENT TRACKING - Calculate actual payments and balances
@@ -2048,10 +2058,10 @@ def calculate_tenant_reconciliation(
     logger.info(
         f"Reconciliation year balance: {float(final_billing):.2f} - {float(recon_paid):.2f} = {float(recon_balance):.2f}")
 
-    # Calculate monthly amount from reconciliation for catch-up
+    # Calculate monthly amount from reconciliation for catch-up (without override)
     monthly_amount = Decimal('0')
     if recon_periods:
-        monthly_amount = final_billing / Decimal(len(recon_periods))
+        monthly_amount = base_billing / Decimal(len(recon_periods))
 
     # Calculate expected catch-up payment
     catchup_expected = Decimal('0')
@@ -2167,11 +2177,13 @@ def calculate_tenant_reconciliation(
         # Final amounts
         'base_billing': format_currency(base_billing),
         'override_amount': format_currency(override_amount),
+        'override_adjustment': 'Yes' if override_amount != 0 else 'No',
         'final_billing': format_currency(final_billing),
 
         # Payment tracking
         'old_monthly': format_currency(old_monthly),
         'new_monthly': format_currency(new_monthly),
+        'new_monthly_excludes_override': 'Yes',
         'monthly_difference': format_currency(payment_change['difference']),
         'percentage_change': format_percentage(payment_change['percentage_change'], 1),
         'change_type': payment_change['change_type'],
@@ -2218,9 +2230,12 @@ def calculate_tenant_reconciliation(
 
         # Final amounts and payment tracking
         'base_billing': base_billing,
+        'override_amount': override_amount,
+        'override_applied_as_adjustment': override_amount != 0,
         'final_billing': final_billing,
         'old_monthly': old_monthly,
         'new_monthly': new_monthly,
+        'new_monthly_excludes_override': True,
         'payment_change': payment_change,
 
         # ENHANCED - Payment and balance tracking
