@@ -369,14 +369,46 @@ def load_json_file(file_path):
         return json.load(f)
 
 def generate_custom_overrides(tenants, properties):
-    """Generate a custom overrides file template with all tenant IDs and names, preserving existing override values"""
+    """Generate a custom overrides file template with all tenant IDs and names, preserving existing override values.
+
+    IMPORTANT: This function uses TenantID from the Tenant CAM data as the key field, not the 'Tenant ID' from
+    the Tenants data. This ensures compatibility with the update_overrides.py script which also uses TenantID.
+    """
     # Define output directory
     overrides_dir = os.path.join('Data', 'ProcessedOutput', 'CustomOverrides')
-    
+
     # Create directory if it doesn't exist
     if not os.path.exists(overrides_dir):
         os.makedirs(overrides_dir)
-    
+
+    # First, load the Tenant CAM data to get the mapping between TenantID and MasterOccupantID
+    tenant_cam_data_path = os.path.join('Output', 'JSON', 'Tenant CAM data1.json')
+    tenant_cam_data = load_json_file(tenant_cam_data_path)
+
+    # Create a mapping from 'Tenant ID' to 'TenantID'
+    tenant_id_mapping = {}
+    tenant_info_by_id = {}
+
+    for cam_entry in tenant_cam_data:
+        tenant_id = cam_entry.get('TenantID')
+        master_id = cam_entry.get('MasterOccupantID')
+        property_id = cam_entry.get('PropertyID')
+
+        if tenant_id and master_id and property_id:
+            # Store the mapping using both TenantID and PropertyID
+            key = f"{master_id}_{property_id}"
+            tenant_id_mapping[key] = tenant_id
+
+            # Also store tenant information for later use
+            tenant_info_by_id[tenant_id] = {
+                'tenant_id': tenant_id,
+                'master_occupant_id': master_id,
+                'property_id': property_id,
+                'tenant_name': cam_entry.get('TenantName', '')
+            }
+
+    print(f"Created mapping for {len(tenant_id_mapping)} tenant records")
+
     # Create a lookup for property names
     property_names = {p.get('Property ID'): p.get('Property Name', '') for p in properties if p.get('Property ID')}
     
@@ -405,48 +437,168 @@ def generate_custom_overrides(tenants, properties):
     tenant_overrides = []
     new_tenant_count = 0
     preserved_count = 0
-    
-    # First, build a unique set of tenant_id and property_id combinations
-    for tenant in tenants:
-        tenant_id = tenant.get('Tenant ID')
-        property_id = tenant.get('Property ID', '')
-        
-        if tenant_id is not None:
+
+    # Build a set of TenantID and property_id combinations from the CAM data
+    # This is preferred over the Tenants data since TenantID is the key field we want to use
+    for cam_entry in tenant_cam_data:
+        tenant_id = cam_entry.get('TenantID')
+        property_id = cam_entry.get('PropertyID', '')
+
+        if tenant_id is not None and property_id:
             # Add this combination to our set to track uniqueness
             tenant_property_pairs.add(f"{tenant_id}_{property_id}")
-    
+
+    # Also add any existing combinations from the Tenants data that might not be in CAM data
+    # This ensures we don't lose any tenants during the transition
+    for tenant in tenants:
+        original_tenant_id = tenant.get('Tenant ID')
+        property_id = tenant.get('Property ID', '')
+
+        if original_tenant_id is not None and property_id:
+            # Try to map to TenantID using the mapping we created
+            key = f"{original_tenant_id}_{property_id}"
+            if key in tenant_id_mapping:
+                mapped_tenant_id = tenant_id_mapping[key]
+                tenant_property_pairs.add(f"{mapped_tenant_id}_{property_id}")
+            else:
+                # If no mapping found, still add the original tenant_id to prevent data loss
+                # But log a warning so we know there might be a mismatch
+                tenant_property_pairs.add(f"{original_tenant_id}_{property_id}")
+                print(f"Warning: No TenantID mapping found for Tenant ID {original_tenant_id} in property {property_id}")
+
     print(f"Found {len(tenant_property_pairs)} unique tenant-property combinations")
     
     # Now process each unique tenant+property combination exactly once
     for key in tenant_property_pairs:
         tenant_id, property_id = key.split('_', 1)
-        
-        # Find the tenant data for this combination
-        tenant_data = None
-        for tenant in tenants:
-            if str(tenant.get('Tenant ID')) == tenant_id and tenant.get('Property ID', '') == property_id:
-                tenant_data = tenant
-                break
-        
-        if not tenant_data:
-            print(f"Warning: Could not find tenant data for ID {tenant_id} in property {property_id}")
-            continue
-            
-        tenant_name = tenant_data.get('Tenant Name', '')
+
+        # First, try to get tenant info from our CAM-based mapping
+        if tenant_id in tenant_info_by_id and tenant_info_by_id[tenant_id]['property_id'] == property_id:
+            tenant_info = tenant_info_by_id[tenant_id]
+            tenant_name = tenant_info['tenant_name']
+        else:
+            # Fall back to looking in the regular tenants data
+            tenant_data = None
+            for tenant in tenants:
+                original_tenant_id = str(tenant.get('Tenant ID'))
+                tenant_property_id = tenant.get('Property ID', '')
+
+                # Check direct match
+                if original_tenant_id == tenant_id and tenant_property_id == property_id:
+                    tenant_data = tenant
+                    break
+
+                # Check via mapping
+                mapped_key = f"{original_tenant_id}_{tenant_property_id}"
+                if mapped_key in tenant_id_mapping and tenant_id_mapping[mapped_key] == tenant_id:
+                    tenant_data = tenant
+                    break
+
+            if not tenant_data:
+                print(f"Warning: Could not find tenant data for TenantID {tenant_id} in property {property_id}")
+                # Try to find a valid tenant_name from the CAM data directly
+                tenant_name = None
+                for cam_entry in tenant_cam_data:
+                    if cam_entry.get('TenantID') == tenant_id and cam_entry.get('PropertyID') == property_id:
+                        tenant_name = cam_entry.get('TenantName', '')
+                        break
+
+                if not tenant_name:
+                    tenant_name = f"Unknown Tenant {tenant_id}"
+            else:
+                tenant_name = tenant_data.get('Tenant Name', '')
+
         property_name = property_names.get(property_id, '')
-        
+
         # Check if this tenant already has override settings
         if key in existing_overrides:
             # Preserve existing override value and description
             tenant_override = existing_overrides[key].copy()
+
             # Update name in case it changed
             tenant_override['tenant_name'] = tenant_name
             tenant_override['property_name'] = property_name
+
+            # Add master_occupant_id if it doesn't exist in the override
+            if 'master_occupant_id' not in tenant_override:
+                master_occupant_id = None
+                for cam_entry in tenant_cam_data:
+                    # Convert TenantID to integer for comparison if possible
+                    cam_tenant_id = cam_entry.get('TenantID')
+                    if isinstance(cam_tenant_id, str):
+                        try:
+                            cam_tenant_id = int(cam_tenant_id)
+                        except ValueError:
+                            pass
+
+                    # Compare using both integer and string representations
+                    tenant_id_int = None
+                    try:
+                        tenant_id_int = int(tenant_id)
+                    except ValueError:
+                        pass
+
+                    tenant_match = (cam_tenant_id == tenant_id or
+                                   (tenant_id_int is not None and cam_tenant_id == tenant_id_int))
+
+                    if tenant_match and cam_entry.get('PropertyID') == property_id:
+                        master_occupant_id = cam_entry.get('MasterOccupantID')
+                        print(f"Found MasterOccupantID {master_occupant_id} for existing tenant {tenant_id} in property {property_id}")
+                        if master_occupant_id:
+                            try:
+                                master_occupant_id = int(master_occupant_id)
+                            except ValueError:
+                                print(f"Warning: Could not convert MasterOccupantID {master_occupant_id} to integer for tenant {tenant_id}")
+                        break
+
+                tenant_override['master_occupant_id'] = master_occupant_id
+
             preserved_count += 1
         else:
             # Create new entry with empty string for override_amount
+            # Make sure to use TenantID here, not the original Tenant ID
+            try:
+                tenant_id_int = int(tenant_id)
+            except ValueError:
+                print(f"Warning: Could not convert TenantID {tenant_id} to integer, using as string")
+                tenant_id_int = tenant_id
+
+            # Look up the MasterOccupantID from the tenant_cam_data
+            master_occupant_id = None
+            for cam_entry in tenant_cam_data:
+                # Convert TenantID to integer for comparison if possible
+                cam_tenant_id = cam_entry.get('TenantID')
+                if isinstance(cam_tenant_id, str):
+                    try:
+                        cam_tenant_id = int(cam_tenant_id)
+                    except ValueError:
+                        pass
+
+                # Compare using both integer and string representations
+                tenant_id_int = None
+                try:
+                    tenant_id_int = int(tenant_id)
+                except ValueError:
+                    pass
+
+                tenant_match = (cam_tenant_id == tenant_id or
+                               (tenant_id_int is not None and cam_tenant_id == tenant_id_int))
+
+                if tenant_match and cam_entry.get('PropertyID') == property_id:
+                    master_occupant_id = cam_entry.get('MasterOccupantID')
+                    print(f"Found MasterOccupantID {master_occupant_id} for tenant {tenant_id} in property {property_id}")
+                    break
+
+            # Convert master_occupant_id to int if possible
+            if master_occupant_id:
+                try:
+                    master_occupant_id = int(master_occupant_id)
+                except ValueError:
+                    print(f"Warning: Could not convert MasterOccupantID {master_occupant_id} to integer for tenant {tenant_id}")
+
             tenant_override = {
-                'tenant_id': int(tenant_id),  # Convert to int to match original format
+                'tenant_id': tenant_id_int,  # This should be TenantID from CAM data
+                'master_occupant_id': master_occupant_id,  # Add MasterOccupantID for Excel mapping
                 'tenant_name': tenant_name,
                 'property_id': property_id,
                 'property_name': property_name,
