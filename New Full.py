@@ -764,10 +764,14 @@ def filter_gl_accounts_with_detail(
             gl_line_details[gl_account]['categories'].add(category)
             gl_line_details[gl_account]['periods'][period]['categories'].add(category)
 
-            # Track which inclusion rules matched
-            for rule in category_inclusions:
-                if check_account_inclusion(gl_account, [rule]):
-                    gl_line_details[gl_account]['inclusion_rules'][category].append(rule)
+            # Track which inclusion rules matched - but only keep the highest priority one
+            # If we haven't added any rules yet for this account/category, set them now
+            if not gl_line_details[gl_account]['inclusion_rules'][category]:
+                for rule in category_inclusions:
+                    if check_account_inclusion(gl_account, [rule]):
+                        # Store only the first matching rule (highest priority based on hierarchy)
+                        gl_line_details[gl_account]['inclusion_rules'][category] = [rule]
+                        break
 
             # Step 2: Check if it should be excluded
             is_excluded = check_account_exclusion(gl_account, category_exclusions)
@@ -782,6 +786,7 @@ def filter_gl_accounts_with_detail(
                 # Track which exclusion rules matched
                 for rule in category_exclusions:
                     if check_account_exclusion(gl_account, [rule]):
+                        # Store the rule, duplicates will be removed when displaying
                         gl_line_details[gl_account]['exclusion_rules'][category].append(rule)
                         gl_line_details[gl_account]['exclusion_levels'][category].add('merged')  # From merged settings
 
@@ -813,6 +818,7 @@ def filter_gl_accounts_with_detail(
                     # Track base exclusion rules
                     for rule in base_exclusions:
                         if check_account_exclusion(gl_account, [rule]):
+                            # Store the rule, duplicates will be removed when displaying
                             gl_line_details[gl_account]['exclusion_rules']['base'].append(rule)
                 else:
                     net_entries['base'].append(processed_transaction)
@@ -840,6 +846,7 @@ def filter_gl_accounts_with_detail(
                     # Track cap exclusion rules
                     for rule in cap_exclusions:
                         if check_account_exclusion(gl_account, [rule]):
+                            # Store the rule, duplicates will be removed when displaying
                             gl_line_details[gl_account]['exclusion_rules']['cap'].append(rule)
                 else:
                     net_entries['cap'].append(processed_transaction)
@@ -1926,7 +1933,7 @@ def generate_gl_detail_report(
         'combined_gross', 'combined_exclusions', 'combined_net',
         'cam_inclusion_rules', 'cam_exclusion_rules',
         'ret_inclusion_rules', 'ret_exclusion_rules',
-        'admin_fee_percentage', 'admin_fee_amount',
+        'admin_fee_percentage', 'admin_fee_exclusion_rules', 'admin_fee_amount',
         'total_before_proration',
         'tenant_share_percentage', 'tenant_share_amount',
         'base_year_impact', 'cap_impact',
@@ -1939,7 +1946,7 @@ def generate_gl_detail_report(
     report_rows = []
     totals = {col: Decimal('0') if col not in ['gl_account', 'description', 'admin_fee_percentage',
                                                'tenant_share_percentage', 'occupancy_factor', 'cam_inclusion_rules',
-                                               'cam_exclusion_rules', 'override_description',
+                                               'cam_exclusion_rules', 'override_description', 'admin_fee_exclusion_rules',
                                                'ret_inclusion_rules', 'ret_exclusion_rules', 'inclusion_categories',
                                                'exclusion_categories'] else '' for col in columns}
 
@@ -1966,6 +1973,14 @@ def generate_gl_detail_report(
                 # This account is excluded from admin fee
                 admin_fee_excluded_accounts.add(gl_account)
                 admin_fee_specific_exclusion_amount += cam_net
+                # Track which admin fee exclusion rules matched
+                for rule in admin_fee_exclusions_list:
+                    if check_account_exclusion(gl_account, [rule]):
+                        if 'exclusion_rules' not in gl_line_details[gl_account]:
+                            gl_line_details[gl_account]['exclusion_rules'] = {}
+                        if 'admin_fee' not in gl_line_details[gl_account]['exclusion_rules']:
+                            gl_line_details[gl_account]['exclusion_rules']['admin_fee'] = []
+                        gl_line_details[gl_account]['exclusion_rules']['admin_fee'].append(rule)
                 logger.debug(f"GL account {gl_account} excluded from admin fee due to specific admin fee exclusions")
 
         # Calculate admin fee eligible CAM net by subtracting specific exclusions
@@ -2066,10 +2081,13 @@ def generate_gl_detail_report(
         # We'll add override functionality later after base calculations match up
 
         # Get inclusion/exclusion rules
+        # For inclusion rules, we already store only the highest priority rule
         cam_inclusion_rules = ', '.join(gl_detail.get('inclusion_rules', {}).get('cam', []))
-        cam_exclusion_rules = ', '.join(gl_detail.get('exclusion_rules', {}).get('cam', []))
+        # For exclusion rules, remove duplicates since they might be added multiple times
+        cam_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('cam', []))))
         ret_inclusion_rules = ', '.join(gl_detail.get('inclusion_rules', {}).get('ret', []))
-        ret_exclusion_rules = ', '.join(gl_detail.get('exclusion_rules', {}).get('ret', []))
+        ret_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('ret', []))))
+        admin_fee_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('admin_fee', []))))
 
         # Get categories
         inclusion_categories = ', '.join(sorted(gl_detail.get('categories', set())))
@@ -2101,6 +2119,7 @@ def generate_gl_detail_report(
             'ret_inclusion_rules': ret_inclusion_rules,
             'ret_exclusion_rules': ret_exclusion_rules,
             'admin_fee_percentage': format_percentage(admin_fee_percentage * Decimal('100'), 2),
+            'admin_fee_exclusion_rules': admin_fee_exclusion_rules,
             'admin_fee_amount': format_currency(admin_fee_amount),
             'total_before_proration': format_currency(total_before_proration),
             'tenant_share_percentage': format_percentage(tenant_share_percentage * Decimal('100'), 4),
