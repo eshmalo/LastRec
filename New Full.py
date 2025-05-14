@@ -11,6 +11,8 @@ Enhancements:
   - Support for catch-up period calculations
   - Tracking of total balances (reconciliation + catch-up)
   - Detailed GL line item reports per tenant
+  - Letter generation fields
+  - Automatic property name mapping from Properties.json
 
 Usage:
 """
@@ -49,15 +51,15 @@ TENANT_CAM_DATA_PATH = os.path.join('Output', 'JSON', 'Tenant CAM data1.json')
 GL_DATA_PATH = os.path.join('Output', 'JSON', 'GL Master 3.json')
 OVERRIDES_PATH = os.path.join('Data', 'ProcessedOutput', 'CustomOverrides', 'custom_overrides.json')
 CAP_HISTORY_PATH = os.path.join('Data', 'cap_history.json')
+PROPERTIES_JSON_PATH = os.path.join('Output', 'JSON', '1. Properties.json')  # NEW
 REPORTS_PATH = os.path.join('Output', 'Reports')
-GL_DETAILS_PATH = os.path.join('Output', 'Reports', 'GL_Details')  # New directory for GL detail reports
+GL_DETAILS_PATH = os.path.join('Output', 'Reports', 'GL_Details')
 
 # Create necessary directories if they don't exist
 for directory in [REPORTS_PATH, GL_DETAILS_PATH]:
     os.makedirs(directory, exist_ok=True)
 
 
-# [Previous utility functions remain the same - load_json, save_json, parse_date, etc.]
 # ========== UTILITY FUNCTIONS ==========
 
 def load_json(file_path: str) -> Dict[str, Any]:
@@ -237,7 +239,27 @@ def deep_merge(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-# [Previous period calculation functions remain the same]
+# NEW: Property name mapping function
+def load_property_name_mapping() -> Dict[str, str]:
+    """Load property name mapping from Properties.json."""
+    try:
+        properties_data = load_json(PROPERTIES_JSON_PATH)
+
+        # Create mapping from Property ID to Property Name
+        mapping = {}
+        for prop in properties_data:
+            property_id = prop.get('Property ID', '')
+            property_name = prop.get('Property Name', '')
+            if property_id and property_name:
+                mapping[property_id] = property_name
+
+        logger.info(f"Loaded property name mapping for {len(mapping)} properties")
+        return mapping
+    except Exception as e:
+        logger.error(f"Error loading property name mapping: {str(e)}")
+        return {}
+
+
 # ========== PERIOD CALCULATION ==========
 
 def generate_recon_periods(recon_year: int) -> List[str]:
@@ -308,7 +330,6 @@ def calculate_periods(recon_year: int, last_bill_date: Optional[str] = None) -> 
     }
 
 
-# [Previous settings loading functions remain the same]
 # ========== SETTINGS LOADING ==========
 
 def load_portfolio_settings() -> Dict[str, Any]:
@@ -586,7 +607,6 @@ def merge_settings(property_id: str, tenant_id: Optional[str] = None) -> Dict[st
     return result
 
 
-# [Modified GL filtering function to track more details]
 # ========== GL DATA LOADING & FILTERING ==========
 
 def load_gl_data(property_id: str) -> List[Dict[str, Any]]:
@@ -819,6 +839,10 @@ def filter_gl_accounts_with_detail(
                     for rule in base_exclusions:
                         if check_account_exclusion(gl_account, [rule]):
                             # Store the rule, duplicates will be removed when displaying
+                            if 'exclusion_rules' not in gl_line_details[gl_account]:
+                                gl_line_details[gl_account]['exclusion_rules'] = {}
+                            if 'base' not in gl_line_details[gl_account]['exclusion_rules']:
+                                gl_line_details[gl_account]['exclusion_rules']['base'] = []
                             gl_line_details[gl_account]['exclusion_rules']['base'].append(rule)
                 else:
                     net_entries['base'].append(processed_transaction)
@@ -847,6 +871,10 @@ def filter_gl_accounts_with_detail(
                     for rule in cap_exclusions:
                         if check_account_exclusion(gl_account, [rule]):
                             # Store the rule, duplicates will be removed when displaying
+                            if 'exclusion_rules' not in gl_line_details[gl_account]:
+                                gl_line_details[gl_account]['exclusion_rules'] = {}
+                            if 'cap' not in gl_line_details[gl_account]['exclusion_rules']:
+                                gl_line_details[gl_account]['exclusion_rules']['cap'] = []
                             gl_line_details[gl_account]['exclusion_rules']['cap'].append(rule)
                 else:
                     net_entries['cap'].append(processed_transaction)
@@ -887,7 +915,6 @@ def filter_gl_accounts_with_detail(
 filter_gl_accounts = filter_gl_accounts_with_detail
 
 
-# [Previous CAM, TAX, ADMIN FEE calculation functions remain the same]
 # ========== CAM, TAX, ADMIN FEE CALCULATIONS ==========
 
 def calculate_admin_fee_percentage(settings: Dict[str, Any]) -> Decimal:
@@ -1079,7 +1106,6 @@ def calculate_cam_tax_admin(
     }
 
 
-# [Previous base year calculation functions remain the same]
 # ========== BASE YEAR CALCULATIONS ==========
 
 def is_base_year_applicable(recon_year: int, base_year_setting: Optional[str]) -> bool:
@@ -1111,6 +1137,7 @@ def calculate_base_year_adjustment(
         logger.info("Base year adjustment does not apply")
         return {
             'base_year_applies': False,
+            'base_year_has_effect': False,  # NEW
             'base_year': None,
             'base_year_amount': Decimal('0'),
             'base_year_adjustment': Decimal('0'),
@@ -1134,6 +1161,7 @@ def calculate_base_year_adjustment(
 
     return {
         'base_year_applies': True,
+        'base_year_has_effect': base_year_adjustment > 0,  # NEW - True only if actually applied
         'base_year': base_year_setting,
         'base_year_amount': base_amount,
         'base_year_adjustment': base_year_adjustment,
@@ -1142,7 +1170,6 @@ def calculate_base_year_adjustment(
     }
 
 
-# [Previous cap calculation functions remain the same]
 # ========== CAP CALCULATIONS ==========
 
 def load_cap_history() -> Dict[str, Dict[str, float]]:
@@ -1338,6 +1365,7 @@ def calculate_cap_deduction(
         logger.info(f"Cap does not apply for tenant {tenant_id}")
         return {
             'cap_applies': False,
+            'cap_has_effect': False,  # NEW
             'cap_limit': Decimal('0'),
             'cap_eligible_amount': cap_eligible_amount,
             'cap_deduction': Decimal('0'),
@@ -1359,6 +1387,7 @@ def calculate_cap_deduction(
 
     return {
         'cap_applies': cap_applies,
+        'cap_has_effect': cap_deduction > 0,  # NEW - True only if deduction actually applied
         'cap_limit': cap_limit,
         'cap_eligible_amount': cap_eligible_amount,
         'cap_deduction': cap_deduction,
@@ -1397,7 +1426,6 @@ def update_cap_history(
     return cap_history
 
 
-# [Previous capital expenses and occupancy functions remain the same]
 # ========== CAPITAL EXPENSES CALCULATION ==========
 
 def calculate_capital_expenses(
@@ -1405,7 +1433,7 @@ def calculate_capital_expenses(
         recon_year: int,
         periods: List[str]
 ) -> Dict[str, Any]:
-    """Calculate amortized capital expenses for the reconciliation."""
+    """Calculate amortized capital expenses for the reconciliation with detailed reporting."""
     # Get capital expenses from settings
     property_expenses = settings.get('property_capital_expenses', [])
     tenant_expenses = settings.get('capital_expenses', [])
@@ -1428,12 +1456,14 @@ def calculate_capital_expenses(
     # Calculate amortized amount for each expense
     amortized_expenses = []
     total_capital_expense = Decimal('0')
+    expense_count = 0
 
     for expense_id, expense in merged_expenses.items():
         # Extract expense details
         expense_year = to_decimal(expense.get('year', '0'), '0')
         expense_amount = to_decimal(expense.get('amount', '0'), '0')
         amort_years = to_decimal(expense.get('amort_years', '1'), '1')
+        description = expense.get('description', '')
 
         # Ensure amortization period is at least 1 year
         if amort_years < 1:
@@ -1441,7 +1471,10 @@ def calculate_capital_expenses(
 
         # Check if expense applies to current year
         expense_year_int = int(expense_year)
-        if expense_year_int > recon_year or expense_year_int + int(amort_years) <= recon_year:
+        start_year = expense_year_int
+        end_year = expense_year_int + int(amort_years) - 1
+
+        if expense_year_int > recon_year or end_year < recon_year:
             continue
 
         # Calculate annual amortized amount
@@ -1462,26 +1495,48 @@ def calculate_capital_expenses(
                     avg_occupancy = sum(occupancy_factors.values()) / Decimal(len(periods))
                     prorated_amount = annual_amount * avg_occupancy
 
+        # Get tenant share percentage if applicable
+        tenant_allocation_percentage = Decimal('1')  # Default to 100%
+        if 'tenant_id' in settings:
+            # Calculate based on tenant's share method
+            property_sf = to_decimal(settings.get('total_rsf', '0'))
+            tenant_sf = to_decimal(settings.get('settings', {}).get('square_footage', '0'))
+
+            if property_sf > 0 and tenant_sf > 0:
+                tenant_allocation_percentage = tenant_sf / property_sf
+
+        # Calculate tenant's share
+        tenant_annual_share = annual_amount * tenant_allocation_percentage
+
         # Add to amortized expenses if there's an amount
         if prorated_amount > 0:
             amortized_expenses.append({
                 'id': expense_id,
-                'description': expense.get('description', ''),
+                'description': description,
                 'year': expense_year_int,
                 'amount': expense_amount,
                 'amort_years': int(amort_years),
                 'annual_amount': annual_amount,
-                'prorated_amount': prorated_amount
+                'prorated_amount': prorated_amount,
+                'start_year': start_year,
+                'end_year': end_year,
+                'total_cost': expense_amount,
+                'amortization_years': int(amort_years),
+                'tenant_allocation_percentage': tenant_allocation_percentage,
+                'tenant_annual_share': tenant_annual_share
             })
 
             total_capital_expense += prorated_amount
+            expense_count += 1
 
     logger.info(
         f"Calculated capital expenses: {len(amortized_expenses)} items, total: {float(total_capital_expense):.2f}")
 
     return {
         'capital_expenses': amortized_expenses,
-        'total_capital_expenses': total_capital_expense
+        'total_capital_expenses': total_capital_expense,
+        'expense_count': expense_count,
+        'has_amortization': expense_count > 0  # NEW
     }
 
 
@@ -1577,7 +1632,6 @@ def apply_occupancy_adjustment(
     return adjusted_amount
 
 
-# [Previous tenant share calculation functions remain the same]
 # ========== TENANT SHARE CALCULATION ==========
 
 def calculate_tenant_share_percentage(
@@ -1627,7 +1681,6 @@ def calculate_tenant_share(amount: Decimal, share_percentage: Decimal) -> Decima
     return tenant_share
 
 
-# [Previous override and payment tracking functions remain the same]
 # ========== MANUAL OVERRIDE HANDLING ==========
 
 def load_manual_overrides() -> List[Dict[str, Any]]:
@@ -1865,24 +1918,13 @@ def calculate_payment_change(
     }
 
 
-# NEW: GL Detail Report functions
 # ========== GL DETAIL REPORTING ==========
-
 
 def generate_gl_detail_report(
         tenant_result: Dict[str, Any],
         property_id: str,
         recon_year: int
 ) -> str:
-    # Log key tenant values for comparison
-    logger.info(f"Starting GL detail report for tenant: {tenant_result['tenant_id']}, {tenant_result['tenant_name']}")
-    logger.info(f"Property report values - tenant_share: {tenant_result.get('tenant_share_amount')}, " +
-               f"subtotal_after_tenant_share: {tenant_result.get('subtotal_after_tenant_share')}, " +
-               f"subtotal_before_occupancy_adjustment: {tenant_result.get('subtotal_before_occupancy_adjustment')}, " +
-               f"occupancy_adjusted_amount: {tenant_result.get('occupancy_adjusted_amount')}, " +
-               f"base_billing: {tenant_result.get('base_billing')}, " +
-               f"override: {tenant_result.get('override_adjustment')}, " +
-               f"final_billing: {tenant_result.get('final_billing')}")
     """Generate a detailed GL line item report for a single tenant that matches actual reconciliation."""
     tenant_id = tenant_result['tenant_id']
     tenant_name = tenant_result['tenant_name']
@@ -1917,7 +1959,7 @@ def generate_gl_detail_report(
     occupancy_factors = tenant_result['occupancy_factors']
 
     # Get override adjustment from actual reconciliation
-    override_adjustment = tenant_result.get('override_adjustment', Decimal('0'))
+    override_adjustment = tenant_result.get('override_amount', Decimal('0'))
     has_override = override_adjustment != 0
 
     # Calculate average occupancy
@@ -1934,6 +1976,7 @@ def generate_gl_detail_report(
         'cam_inclusion_rules', 'cam_exclusion_rules',
         'ret_inclusion_rules', 'ret_exclusion_rules',
         'admin_fee_percentage', 'admin_fee_exclusion_rules', 'admin_fee_amount',
+        'base_exclusion_rules', 'cap_exclusion_rules',
         'total_before_proration',
         'tenant_share_percentage', 'tenant_share_amount',
         'base_year_impact', 'cap_impact',
@@ -1946,13 +1989,11 @@ def generate_gl_detail_report(
     report_rows = []
     totals = {col: Decimal('0') if col not in ['gl_account', 'description', 'admin_fee_percentage',
                                                'tenant_share_percentage', 'occupancy_factor', 'cam_inclusion_rules',
-                                               'cam_exclusion_rules', 'override_description', 'admin_fee_exclusion_rules',
-                                               'ret_inclusion_rules', 'ret_exclusion_rules', 'inclusion_categories',
+                                               'cam_exclusion_rules', 'override_description',
+                                               'admin_fee_exclusion_rules',
+                                               'ret_inclusion_rules', 'ret_exclusion_rules', 'base_exclusion_rules',
+                                               'cap_exclusion_rules', 'inclusion_categories',
                                                'exclusion_categories'] else '' for col in columns}
-
-    # Log core property report values for comparison without forcing them to match
-    property_base_billing = tenant_result.get('base_billing', Decimal('0'))
-    property_final_billing = tenant_result.get('final_billing', Decimal('0'))
 
     # First pass: Calculate admin fee exclusions like in the property report
     admin_fee_excluded_accounts = set()
@@ -2026,24 +2067,27 @@ def generate_gl_detail_report(
         total_before_proration = combined_net + admin_fee_amount
 
         # Apply tenant share with consistent rounding to match property report approach
-        tenant_share_amount = (total_before_proration * tenant_share_percentage).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+        tenant_share_amount = (total_before_proration * tenant_share_percentage).quantize(Decimal('0.000001'),
+                                                                                          rounding=ROUND_HALF_UP)
 
         # Calculate proportional base year impact
         base_year_impact = Decimal('0')
-        if base_year_result['base_year_applies'] and total_base_net > 0:
+        if base_year_result['base_year_has_effect'] and total_base_net > 0:
             base_net_for_gl = gl_detail['net'].get('base', Decimal('0'))
             if base_net_for_gl > 0:
                 # Proportional share of base year adjustment with consistent rounding
                 base_year_impact = ((base_net_for_gl / total_base_net) * base_year_result[
-                    'base_year_adjustment'] * tenant_share_percentage).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                    'base_year_adjustment'] * tenant_share_percentage).quantize(Decimal('0.000001'),
+                                                                                rounding=ROUND_HALF_UP)
 
         # Calculate proportional cap impact
         cap_impact = Decimal('0')
-        if cap_result['cap_applies'] and total_cap_net > 0:
+        if cap_result['cap_has_effect'] and total_cap_net > 0:
             cap_net_for_gl = gl_detail['net'].get('cap', Decimal('0'))
             if cap_net_for_gl > 0:
                 # Proportional share of cap deduction with consistent rounding
-                cap_impact = ((cap_net_for_gl / total_cap_net) * cap_result['cap_deduction'] * tenant_share_percentage).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                cap_impact = ((cap_net_for_gl / total_cap_net) * cap_result[
+                    'cap_deduction'] * tenant_share_percentage).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
 
         # Calculate override impact for this GL line
         # Distribute override proportionally across GL accounts based on tenant share amount
@@ -2075,11 +2119,6 @@ def generate_gl_detail_report(
         # Round to 6 decimal places to match property report calculation
         final_tenant_amount = (after_adjustments * avg_occupancy).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
 
-        # Log comparison values for debugging
-        logger.debug(f"GL item {gl_account} - tenant_share: {tenant_share_amount}, final_amount: {final_tenant_amount}")
-
-        # We'll add override functionality later after base calculations match up
-
         # Get inclusion/exclusion rules
         # For inclusion rules, we already store only the highest priority rule
         cam_inclusion_rules = ', '.join(gl_detail.get('inclusion_rules', {}).get('cam', []))
@@ -2088,6 +2127,8 @@ def generate_gl_detail_report(
         ret_inclusion_rules = ', '.join(gl_detail.get('inclusion_rules', {}).get('ret', []))
         ret_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('ret', []))))
         admin_fee_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('admin_fee', []))))
+        base_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('base', []))))
+        cap_exclusion_rules = ', '.join(sorted(set(gl_detail.get('exclusion_rules', {}).get('cap', []))))
 
         # Get categories
         inclusion_categories = ', '.join(sorted(gl_detail.get('categories', set())))
@@ -2121,6 +2162,8 @@ def generate_gl_detail_report(
             'admin_fee_percentage': format_percentage(admin_fee_percentage * Decimal('100'), 2),
             'admin_fee_exclusion_rules': admin_fee_exclusion_rules,
             'admin_fee_amount': format_currency(admin_fee_amount),
+            'base_exclusion_rules': base_exclusion_rules,
+            'cap_exclusion_rules': cap_exclusion_rules,
             'total_before_proration': format_currency(total_before_proration),
             'tenant_share_percentage': format_percentage(tenant_share_percentage * Decimal('100'), 4),
             'tenant_share_amount': format_currency(tenant_share_amount),
@@ -2136,7 +2179,7 @@ def generate_gl_detail_report(
 
         report_rows.append(row)
 
-        # Update totals - use the actual property report values for the tenant share calculation
+        # Update totals
         totals['cam_gross'] = totals.get('cam_gross', Decimal('0')) + cam_gross
         totals['cam_exclusions'] = totals.get('cam_exclusions', Decimal('0')) + cam_exclusions
         totals['cam_net'] = totals.get('cam_net', Decimal('0')) + cam_net
@@ -2148,33 +2191,11 @@ def generate_gl_detail_report(
         totals['combined_net'] = totals.get('combined_net', Decimal('0')) + combined_net
         totals['admin_fee_amount'] = totals.get('admin_fee_amount', Decimal('0')) + admin_fee_amount
         totals['total_before_proration'] = totals.get('total_before_proration', Decimal('0')) + total_before_proration
-
-        # Use the exact values from property report calculation instead of summing GL lines
-        # This is only relevant if we've processed all GL lines and are at the end
-        if gl_account == list(sorted(gl_line_details.keys()))[-1]:
-            property_base_billing = tenant_result.get('base_billing')
-            if property_base_billing is not None:
-                # We're at the last GL line, use property report values for tenant share to match exactly
-                totals['tenant_share_amount'] = property_base_billing
-                totals['final_tenant_amount'] = property_base_billing
-            else:
-                # Fallback to calculated values if property report values aren't available
-                totals['tenant_share_amount'] = totals.get('tenant_share_amount', Decimal('0')) + tenant_share_amount
-                totals['final_tenant_amount'] = totals.get('final_tenant_amount', Decimal('0')) + final_tenant_amount
-        else:
-            # Normal case - add to running total
-            totals['tenant_share_amount'] = totals.get('tenant_share_amount', Decimal('0')) + tenant_share_amount
-            totals['final_tenant_amount'] = totals.get('final_tenant_amount', Decimal('0')) + final_tenant_amount
-
+        totals['tenant_share_amount'] = totals.get('tenant_share_amount', Decimal('0')) + tenant_share_amount
         totals['base_year_impact'] = totals.get('base_year_impact', Decimal('0')) + base_year_impact
         totals['cap_impact'] = totals.get('cap_impact', Decimal('0')) + cap_impact
         totals['override_amount'] = totals.get('override_amount', Decimal('0')) + override_impact
-
-    # Log tenant results subtotals
-    logger.info(f"SUBTOTALS - tenant_id: {tenant_id}, " +
-               f"GL Detail: tenant_share_amount={totals['tenant_share_amount']}, " +
-               f"tenant.subtotal_after_tenant_share={tenant_result.get('subtotal_after_tenant_share')}, " +
-               f"tenant.tenant_share_amount={tenant_result.get('tenant_share_amount')}")
+        totals['final_tenant_amount'] = totals.get('final_tenant_amount', Decimal('0')) + final_tenant_amount
 
     # Format totals row
     totals['gl_account'] = 'TOTAL'
@@ -2203,10 +2224,16 @@ def generate_gl_detail_report(
 
     # Set total override description
     if has_override:
-        if override_adjustment < 0:
-            totals['override_description'] = 'Manual Reduction (Total)'
+        # Get the actual override description from the custom overrides file
+        override_info = get_tenant_override(tenant_id, property_id)
+        if override_info['override_description']:
+            totals['override_description'] = override_info['override_description']
         else:
-            totals['override_description'] = 'Manual Addition (Total)'
+            # Fall back to generic description if no description available
+            if override_adjustment < 0:
+                totals['override_description'] = 'Manual Reduction (Total)'
+            else:
+                totals['override_description'] = 'Manual Addition (Total)'
 
     totals['occupancy_factor'] = f"{float(avg_occupancy):.4f}"
     totals['final_tenant_amount'] = format_currency(totals['final_tenant_amount'])
@@ -2226,17 +2253,6 @@ def generate_gl_detail_report(
         capital_share = capital_expenses_total * tenant_share_percentage
         capital_final_amount = (capital_share * avg_occupancy).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
 
-        # Log capital expense comparison
-        tenant_capital = capital_expenses_total * tenant_share_percentage
-        property_capital = tenant_result.get('capital_expenses_result', {}).get('total_capital_expenses', 0.0)
-
-        logger.info(f"CAPITAL EXPENSE - tenant_id: {tenant_id}, " +
-                   f"GL Detail tenant_share: {tenant_capital}, " +
-                   f"Property report capital: {property_capital}, " +
-                   f"GL Detail final (with occupancy): {capital_final_amount}, " +
-                   f"Property report tenant_capital_expenses: {tenant_result.get('tenant_capital_expenses', 0.0)}")
-
-        # Override functionality will be added later
         capital_row['override_amount'] = "$0.00"
         capital_row['override_description'] = ""
 
@@ -2244,80 +2260,8 @@ def generate_gl_detail_report(
         report_rows.append(capital_row)
 
         # Update final totals
-        property_base_billing = tenant_result.get('base_billing')
-        if property_base_billing is not None:
-            # Use the final value from property report - already includes capital expenses
-            totals['final_tenant_amount'] = format_currency(property_base_billing)
-        else:
-            # Fallback to calculated values
-            totals['final_tenant_amount'] = format_currency(
-                to_decimal(totals['final_tenant_amount'].replace('$', '')) + capital_final_amount)
-
-    # Log detailed calculation comparison
-    property_admin_net = tenant_cam_tax_admin.get('admin_fee_net', Decimal('0'))
-    property_cam_net = tenant_cam_tax_admin.get('cam_net', Decimal('0'))
-    property_combined_net = tenant_cam_tax_admin.get('combined_net_total', Decimal('0'))
-
-    # Calculate GL totals
-    gl_cam_net_total = Decimal('0')
-    gl_admin_total = Decimal('0')
-    gl_combined_net_total = Decimal('0')
-
-    for gl_account, admin_value in gl_line_details.items():
-        gl_cam_net = admin_value.get('net', {}).get('cam', Decimal('0'))
-        gl_ret_net = admin_value.get('net', {}).get('ret', Decimal('0'))
-        gl_cam_net_total += gl_cam_net
-        gl_combined_net_total += gl_cam_net + gl_ret_net
-
-    # Use the exact same admin fee calculation as property report
-    gl_admin_total = total_admin_fee
-
-    # Calculate what tenant share would be with GL calculation vs property calculation
-    gl_tenant_share = (gl_combined_net_total + gl_admin_total) * tenant_share_percentage
-    property_tenant_share = property_combined_net * tenant_share_percentage
-
-    logger.info(f"CAM NET COMPARISON - GL Detail: {gl_cam_net_total:.6f}, Property Report: {property_cam_net:.6f}, " +
-                f"Difference: {gl_cam_net_total - property_cam_net:.6f} ({(gl_cam_net_total - property_cam_net) / property_cam_net * 100 if property_cam_net else 0:.3f}%)")
-
-    logger.info(f"ADMIN FEE COMPARISON - GL Detail: {gl_admin_total:.6f}, Property Report: {property_admin_net:.6f}, " +
-                f"Difference: {gl_admin_total - property_admin_net:.6f} ({(gl_admin_total - property_admin_net) / property_admin_net * 100 if property_admin_net else 0:.3f}%)")
-
-    logger.info(f"COMBINED NET COMPARISON - GL Detail: {gl_combined_net_total + gl_admin_total:.6f}, Property Report: {property_combined_net:.6f}, " +
-                f"Difference: {(gl_combined_net_total + gl_admin_total) - property_combined_net:.6f} ({((gl_combined_net_total + gl_admin_total) - property_combined_net) / property_combined_net * 100 if property_combined_net else 0:.3f}%)")
-
-    logger.info(f"TENANT SHARE CALCULATION - GL: {(gl_combined_net_total + gl_admin_total):.6f} × {tenant_share_percentage:.6f} = {gl_tenant_share:.6f}, " +
-                f"Property: {property_combined_net:.6f} × {tenant_share_percentage:.6f} = {property_tenant_share:.6f}")
-
-    # Log total comparison at the end with all key calculation values
-    gl_total = to_decimal(totals['final_tenant_amount'].replace('$', ''))
-    total_before_occupancy = to_decimal(totals['tenant_share_amount'].replace('$', ''))
-
-    # Calculate occupancy adjusted total (may differ slightly from property report due to rounding methods)
-    # GL detail calculates line-by-line while property report calculates based on totals
-    occupancy_adjusted_total = (total_before_occupancy * avg_occupancy).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
-
-    # Get property report values consistently
-    property_subtotal_before_occupancy = tenant_result.get('subtotal_before_occupancy_adjustment')
-    property_occupancy_adjusted = tenant_result.get('occupancy_adjusted_amount')
-    property_base_billing = tenant_result.get('base_billing')
-    property_final_billing = tenant_result.get('final_billing')
-
-    # Log detailed comparison - differences are expected due to line-by-line admin fee calculation vs total-based calculation
-    # The property report calculates admin fee on total CAM net, while GL detail calculates it per line then sums
-    logger.info(f"DETAILED COMPARISON - tenant_id: {tenant_id}, " +
-               f"GL Detail subtotal_before_occupancy: {total_before_occupancy}, " +
-               f"Property report subtotal_before_occupancy: {property_subtotal_before_occupancy}, " +
-               f"GL Detail occupancy_adjusted: {occupancy_adjusted_total}, " +
-               f"Property report occupancy_adjusted: {property_occupancy_adjusted}, " +
-               f"GL Detail Total: {gl_total}, " +
-               f"Property report base_billing: {property_base_billing}, " +
-               f"Property report final_billing: {property_final_billing}")
-
-    # Calculate percentage differences - admin fee calculation differs between reports
-    if property_base_billing is not None and property_base_billing != 0:
-        base_billing_diff_pct = ((gl_total - property_base_billing) / property_base_billing * 100).quantize(Decimal('0.001'), rounding=ROUND_HALF_UP)
-        logger.info(f"Base billing difference: {gl_total - property_base_billing} ({base_billing_diff_pct}%) - " +
-                   f"due to admin fee calculation: GL calculates line-by-line, Property report uses totals")
+        totals['final_tenant_amount'] = format_currency(
+            to_decimal(totals['final_tenant_amount'].replace('$', '')) + capital_final_amount)
 
     # Write CSV File
     with open(output_path, 'w', newline='') as csvfile:
@@ -2349,7 +2293,7 @@ def generate_csv_report(
     # Define columns for the report - enhanced with calculation detail columns
     columns = [
         # Basic tenant information
-        'tenant_id', 'tenant_name', 'property_id', 'property_name', 'suite',
+        'tenant_id', 'tenant_name', 'property_id', 'property_name', 'property_full_name', 'suite',
         'lease_start', 'lease_end', 'share_method', 'share_percentage',
 
         # Property totals
@@ -2370,11 +2314,13 @@ def generate_csv_report(
         # Base year details
         'base_year', 'base_year_amount',
         'total_before_base_adjustment', 'base_year_adjustment', 'after_base_adjustment',
+        'base_year_applied',
 
         # Cap details
         'cap_applies', 'cap_type', 'cap_reference_amount', 'cap_percentage',
         'cap_limit', 'cap_eligible_amount', 'cap_deduction',
         'after_cap_adjustment',
+        'cap_applied',
 
         # Property total before tenant prorations
         'property_total_before_prorations',
@@ -2390,17 +2336,41 @@ def generate_csv_report(
         'subtotal_before_occupancy_adjustment', 'occupancy_adjusted_amount',
 
         # Final amounts
-        'base_billing', 'override_amount', 'override_adjustment', 'final_billing',
+        'base_billing', 'override_amount', 'override_adjustment', 'override_description', 'final_billing',
+        'has_override',
 
         # Payment tracking
         'old_monthly', 'new_monthly', 'new_monthly_excludes_override', 'monthly_difference',
         'percentage_change', 'change_type', 'is_significant',
 
         # Enhanced payment tracking and balance calculation
-        'reconciliation_periods', 'reconciliation_expected', 'reconciliation_paid', 'reconciliation_balance',
-        'catchup_periods', 'catchup_monthly', 'catchup_expected', 'catchup_paid', 'catchup_balance',
-        'total_balance'
+        'reconciliation_periods', 'reconciliation_expected', 'reconciliation_paid',
+        'reconciliation_balance',
+        'catchup_periods', 'catchup_monthly', 'catchup_expected', 'catchup_paid',
+        'catchup_balance',
+        'total_balance',
+        'has_catchup_period',
+
+        # Period dates
+        'reconciliation_start_date', 'reconciliation_end_date',
+        'catchup_start_date', 'catchup_end_date',
+
+        # Effective dates
+        'letter_generation_date', 'monthly_charge_effective_date', 'payment_due_date',
+
+        # Amortization summary
+        'amortization_exists', 'amortization_total_amount', 'amortization_items_count',
     ]
+
+    # Add columns for up to 5 amortization items
+    for i in range(1, 6):
+        columns.extend([
+            f'amortization_{i}_description',
+            f'amortization_{i}_total_amount',
+            f'amortization_{i}_years',
+            f'amortization_{i}_annual_amount',
+            f'amortization_{i}_your_share'
+        ])
 
     # Write the CSV file
     try:
@@ -2436,13 +2406,15 @@ def generate_json_report(
     output_path = os.path.join(REPORTS_PATH,
                                f"tenant_billing_detail_{property_id}_{category_str}_{recon_year}_{timestamp}.json")
 
-    # JSON encoder class to handle Decimal and Set objects
+    # JSON encoder class to handle Decimal, Set and Date objects
     class CustomEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, Decimal):
                 return str(obj)
             if isinstance(obj, set):
                 return list(obj)  # Convert sets to lists for JSON serialization
+            if isinstance(obj, (datetime.date, datetime.datetime)):
+                return obj.isoformat()  # Convert dates to ISO format string
             # Let the base class default method handle other types
             return super().default(obj)
 
@@ -2452,6 +2424,8 @@ def generate_json_report(
             return str(data)
         elif isinstance(data, set):
             return list(data)
+        elif isinstance(data, (datetime.date, datetime.datetime)):
+            return data.isoformat()  # Convert dates to ISO format string
         elif isinstance(data, dict):
             return {k: prepare_for_serialization(v) for k, v in data.items()}
         elif isinstance(data, list):
@@ -2476,7 +2450,6 @@ def generate_json_report(
         return ""
 
 
-# [Modified main calculation function to generate GL detail reports]
 # ========== MAIN CALCULATION FUNCTION ==========
 
 def calculate_tenant_reconciliation(
@@ -2645,7 +2618,45 @@ def calculate_tenant_reconciliation(
     logger.info(
         f"Total balance: {float(recon_balance):.2f} + {float(catchup_balance):.2f} = {float(total_balance):.2f}")
 
-    # STEP 16: Create a detailed report row with enhanced fields
+    # STEP 16: Calculate period dates
+    recon_start_date = None
+    recon_end_date = None
+    if recon_periods:
+        first_period_info = get_period_info(recon_periods[0])
+        last_period_info = get_period_info(recon_periods[-1])
+        if first_period_info['valid']:
+            recon_start_date = first_period_info['first_day']
+        if last_period_info['valid']:
+            recon_end_date = last_period_info['last_day']
+
+    catchup_start_date = None
+    catchup_end_date = None
+    if catchup_periods:
+        first_catchup_info = get_period_info(catchup_periods[0])
+        last_catchup_info = get_period_info(catchup_periods[-1])
+        if first_catchup_info['valid']:
+            catchup_start_date = first_catchup_info['first_day']
+        if last_catchup_info['valid']:
+            catchup_end_date = last_catchup_info['last_day']
+
+    # STEP 17: Calculate effective dates
+    current_date = datetime.date.today()
+    letter_generation_date = current_date
+
+    # Monthly charge effective date - typically first of next month
+    if current_date.month == 12:
+        monthly_charge_effective_date = datetime.date(current_date.year + 1, 1, 1)
+    else:
+        monthly_charge_effective_date = datetime.date(current_date.year, current_date.month + 1, 1)
+
+    # Payment due date - typically 30 days from letter generation
+    payment_due_date = current_date + datetime.timedelta(days=30)
+
+    # STEP 18: Get property full name from Properties.json
+    property_name_mapping = load_property_name_mapping()
+    property_full_name = property_name_mapping.get(property_id, property_settings.get('name', property_id))
+
+    # STEP 19: Create a detailed report row with enhanced fields
     share_method = settings.get('settings', {}).get('prorate_share_method', 'RSF')
 
     # Count full/partial months
@@ -2660,6 +2671,7 @@ def calculate_tenant_reconciliation(
         'tenant_name': settings.get('tenant_name', ''),
         'property_id': property_id,
         'property_name': property_settings.get('name', ''),
+        'property_full_name': property_full_name,
         'suite': settings.get('suite', ''),
         'lease_start': settings.get('lease_start', ''),
         'lease_end': settings.get('lease_end', ''),
@@ -2698,6 +2710,7 @@ def calculate_tenant_reconciliation(
         'total_before_base_adjustment': format_currency(before_base_amount),
         'base_year_adjustment': format_currency(base_year_adjustment),
         'after_base_adjustment': format_currency(after_base_amount),
+        'base_year_applied': 'true' if base_year_result['base_year_has_effect'] else 'false',
 
         # Cap details
         'cap_applies': 'Yes' if cap_result['cap_applies'] else 'No',
@@ -2712,6 +2725,7 @@ def calculate_tenant_reconciliation(
         'cap_eligible_amount': format_currency(cap_result['cap_eligible_amount']),
         'cap_deduction': format_currency(cap_result['cap_deduction']),
         'after_cap_adjustment': format_currency(after_cap_amount),
+        'cap_applied': 'true' if cap_result['cap_has_effect'] else 'false',
 
         # Property total before tenant prorations
         'property_total_before_prorations': format_currency(property_total_after_adjustments),
@@ -2736,7 +2750,9 @@ def calculate_tenant_reconciliation(
         'base_billing': format_currency(base_billing),
         'override_amount': format_currency(override_amount),
         'override_adjustment': 'Yes' if override_amount != 0 else 'No',
+        'override_description': override_info['override_description'] if override_amount != 0 else '',
         'final_billing': format_currency(final_billing),
+        'has_override': 'true' if override_amount != 0 else 'false',
 
         # Payment tracking
         'old_monthly': format_currency(old_monthly),
@@ -2760,7 +2776,45 @@ def calculate_tenant_reconciliation(
         'catchup_balance': format_currency(catchup_balance),
 
         'total_balance': format_currency(total_balance),
+        'has_catchup_period': 'true' if catchup_periods else 'false',
+
+        # Period dates
+        'reconciliation_start_date': recon_start_date.strftime('%Y-%m-%d') if recon_start_date else '',
+        'reconciliation_end_date': recon_end_date.strftime('%Y-%m-%d') if recon_end_date else '',
+        'catchup_start_date': catchup_start_date.strftime('%Y-%m-%d') if catchup_start_date else '',
+        'catchup_end_date': catchup_end_date.strftime('%Y-%m-%d') if catchup_end_date else '',
+
+        # Effective dates
+        'letter_generation_date': letter_generation_date.strftime('%Y-%m-%d'),
+        'monthly_charge_effective_date': monthly_charge_effective_date.strftime('%Y-%m-%d'),
+        'payment_due_date': payment_due_date.strftime('%Y-%m-%d'),
+
+        # Amortization summary
+        'amortization_exists': 'true' if capital_expenses_result['has_amortization'] else 'false',
+        'amortization_total_amount': format_currency(capital_expenses_result['total_capital_expenses']),
+        'amortization_items_count': str(capital_expenses_result['expense_count']),
     }
+
+    # Add individual amortization items (up to 5)
+    for i, expense in enumerate(capital_expenses_result['capital_expenses'][:5], 1):
+        tenant_share_of_expense = expense.get('prorated_amount', Decimal('0')) * tenant_share_percentage
+        report_row.update({
+            f'amortization_{i}_description': expense.get('description', ''),
+            f'amortization_{i}_total_amount': format_currency(expense.get('total_cost', 0)),
+            f'amortization_{i}_years': str(expense.get('amortization_years', 0)),
+            f'amortization_{i}_annual_amount': format_currency(expense.get('annual_amount', 0)),
+            f'amortization_{i}_your_share': format_currency(tenant_share_of_expense)
+        })
+
+    # Fill empty columns for any remaining slots (if less than 5 expenses)
+    for i in range(len(capital_expenses_result['capital_expenses']) + 1, 6):
+        report_row.update({
+            f'amortization_{i}_description': '',
+            f'amortization_{i}_total_amount': '',
+            f'amortization_{i}_years': '',
+            f'amortization_{i}_annual_amount': '',
+            f'amortization_{i}_your_share': ''
+        })
 
     # Return comprehensive results
     return {
@@ -2780,15 +2834,19 @@ def calculate_tenant_reconciliation(
         'cap_result': cap_result,
         'capital_expenses_result': capital_expenses_result,
         'tenant_share_percentage': tenant_share_percentage,
-        'tenant_share': tenant_share,
+        'tenant_share_amount': tenant_share,
         'property_total_after_adjustments': property_total_after_adjustments,
+        'subtotal_after_tenant_share': subtotal_after_tenant_share,
+        'subtotal_before_occupancy_adjustment': subtotal_after_tenant_share,
         'occupancy_factors': occupancy_factors,
         'average_occupancy': avg_occupancy,
+        'occupancy_adjusted_amount': occupancy_adjusted_amount,
         'override_info': override_info,
+        'override_adjustment': override_amount,
+        'override_amount': override_amount,
 
         # Final amounts and payment tracking
         'base_billing': base_billing,
-        'override_amount': override_amount,
         'override_applied_as_adjustment': override_amount != 0,
         'final_billing': final_billing,
         'old_monthly': old_monthly,
@@ -2806,6 +2864,21 @@ def calculate_tenant_reconciliation(
             'total_balance': total_balance,
             'recon_payments_detail': recon_payments,
             'catchup_payments_detail': catchup_payment_data if catchup_periods else None
+        },
+
+        # Period information
+        'period_dates': {
+            'reconciliation_start': recon_start_date,
+            'reconciliation_end': recon_end_date,
+            'catchup_start': catchup_start_date,
+            'catchup_end': catchup_end_date
+        },
+
+        # Effective dates
+        'effective_dates': {
+            'letter_generation': letter_generation_date,
+            'monthly_charge_effective': monthly_charge_effective_date,
+            'payment_due': payment_due_date
         },
 
         # Enhanced report row for CSV export
@@ -2874,7 +2947,7 @@ def process_property_reconciliation(
         'tenant_results': tenant_results,
         'csv_report_path': csv_report_path,
         'json_report_path': json_report_path,
-        'gl_detail_reports': gl_detail_reports  # NEW
+        'gl_detail_reports': gl_detail_reports
     }
 
 
