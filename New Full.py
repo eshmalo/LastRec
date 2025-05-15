@@ -1725,6 +1725,11 @@ def get_tenant_override(
 
     The override amount is treated as an adjustment that gets added to the calculated billing amount,
     not as a replacement for the entire calculated amount.
+    
+    IMPORTANT: The override amount is used exactly as provided in the custom_overrides.json file,
+    with no scaling or adjustments based on the description, months, or reconciliation periods.
+    The description field (e.g., "Jan-Apr 2024 payment") is for informational purposes only
+    and does not affect calculations.
     """
     # Load all overrides
     overrides = load_manual_overrides()
@@ -1762,7 +1767,11 @@ def get_tenant_override(
 # ========== TENANT PAYMENT TRACKING ==========
 
 def get_old_monthly_payment(tenant_id: str, property_id: str) -> Decimal:
-    """Get the old monthly payment amount for a tenant."""
+    """Get the old monthly payment amount for a tenant.
+    
+    NOTE: This function is only used for payment tracking and has no effect on override amounts.
+    Override amounts from custom_overrides.json are used exactly as-is with no adjustments.
+    """
     # Load tenant CAM data
     tenant_cam_data = load_json(TENANT_CAM_DATA_PATH)
 
@@ -1958,8 +1967,11 @@ def generate_gl_detail_report(
     cap_result = tenant_result['cap_result']
     occupancy_factors = tenant_result['occupancy_factors']
 
-    # Get override adjustment from actual reconciliation
-    override_adjustment = tenant_result.get('override_amount', Decimal('0'))
+    # Get override adjustment DIRECTLY from the custom_overrides.json file
+    # NOT from tenant_result which might have already been modified
+    # This ensures we always use the original override amount with no scaling or adjustments
+    override_info = get_tenant_override(tenant_id, property_id)
+    override_adjustment = override_info['override_amount']  # Use the raw value directly
     has_override = override_adjustment != 0
 
     # Calculate average occupancy
@@ -1980,8 +1992,8 @@ def generate_gl_detail_report(
         'total_before_proration',
         'tenant_share_percentage', 'tenant_share_amount',
         'base_year_impact', 'cap_impact',
-        'override_amount', 'override_description',
-        'occupancy_factor', 'final_tenant_amount',
+        'occupancy_factor', 'override_amount', 'override_description',
+        'final_tenant_amount',
         'inclusion_categories', 'exclusion_categories'
     ]
 
@@ -2092,32 +2104,60 @@ def generate_gl_detail_report(
         # Calculate override impact for this GL line
         # Distribute override proportionally across GL accounts based on tenant share amount
         override_impact = Decimal('0')
-        if has_override and totals['tenant_share_amount'] > 0:
-            # For the first GL line, we need to initialize the total tenant share
-            if totals['tenant_share_amount'] == 0:
-                for _, gl_data in sorted(gl_line_details.items()):
-                    # Calculate tenant share for all GL lines to get the total
+        if has_override:
+            # First, calculate the total tenant share amount across all GL accounts if not already done
+            # This is needed to properly proportion the override amount
+            if 'total_tenant_share_calculated' not in totals or not totals['total_tenant_share_calculated']:
+                # Reset and recalculate the total tenant share amount to ensure accuracy
+                total_tenant_share = Decimal('0')
+                # Loop through all GL accounts to sum up their tenant share amounts
+                for gl_acct, gl_data in sorted(gl_line_details.items()):
+                    # Calculate components for this GL account
                     gl_cam_net = gl_data['net'].get('cam', Decimal('0'))
                     gl_ret_net = gl_data['net'].get('ret', Decimal('0'))
                     gl_combined_net = gl_cam_net + gl_ret_net
-                    # Check if account is excluded from admin fee
-                    is_excluded = gl_account in admin_fee_excluded_accounts
+                    
+                    # Calculate admin fee for this account
                     gl_admin_fee = Decimal('0')
-                    if not is_excluded and cam_net_eligible_for_admin_fee > 0:
+                    is_excluded = gl_acct in admin_fee_excluded_accounts
+                    if not is_excluded and cam_net_eligible_for_admin_fee > 0 and gl_cam_net > 0:
                         gl_admin_fee = (gl_cam_net / cam_net_eligible_for_admin_fee) * total_admin_fee
+                    
+                    # Calculate total before proration
                     gl_before_proration = gl_combined_net + gl_admin_fee
-                    totals['tenant_share_amount'] += gl_before_proration * tenant_share_percentage
+                    
+                    # Apply tenant share percentage to get tenant share amount
+                    gl_tenant_share = gl_before_proration * tenant_share_percentage
+                    
+                    # Add to running total
+                    total_tenant_share += gl_tenant_share
+                
+                # Store the total and mark as calculated
+                totals['total_tenant_share_for_override'] = total_tenant_share
+                totals['total_tenant_share_calculated'] = True
+                logger.debug(f"Calculated total tenant share amount for override distribution: {total_tenant_share}")
+            
+            # Now calculate this GL account's proportional share of the override amount
+            # IMPORTANT: Use the original override amount directly with no scaling or adjustments
+            # The override_adjustment now comes directly from get_tenant_override() and not from tenant_result
+            total_tenant_share = totals['total_tenant_share_for_override']
+            if total_tenant_share > 0 and tenant_share_amount > 0:
+                # Calculate the proportional override amount for this GL line
+                # based on its percentage contribution to the total tenant share
+                override_impact = (tenant_share_amount / total_tenant_share) * override_adjustment
+                logger.debug(f"GL {gl_account}: Tenant share ${tenant_share_amount} / Total ${total_tenant_share} = " +
+                           f"{tenant_share_amount / total_tenant_share:.4f} × Override ${override_adjustment} = ${override_impact}")
 
-            # Calculate proportional override for this GL line
-            if totals['tenant_share_amount'] > 0:
-                override_impact = (tenant_share_amount / totals['tenant_share_amount']) * override_adjustment
+        # Apply base year and cap impacts first
+        after_base_cap_adjustments = tenant_share_amount - base_year_impact - cap_impact
 
-        # Apply occupancy adjustment (no override yet)
-        after_adjustments = tenant_share_amount - base_year_impact - cap_impact
-
-        # Use the property report's calculation methods to ensure consistency
+        # Apply occupancy adjustment
         # Round to 6 decimal places to match property report calculation
-        final_tenant_amount = (after_adjustments * avg_occupancy).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+        after_occupancy = (after_base_cap_adjustments * avg_occupancy).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+        
+        # Apply override amount AFTER occupancy adjustment
+        # Override is a fixed amount that doesn't get adjusted by occupancy
+        final_tenant_amount = after_occupancy + override_impact
 
         # Get inclusion/exclusion rules
         # For inclusion rules, we already store only the highest priority rule
@@ -2169,9 +2209,10 @@ def generate_gl_detail_report(
             'tenant_share_amount': format_currency(tenant_share_amount),
             'base_year_impact': format_currency(base_year_impact * -1) if base_year_impact > 0 else '$0.00',
             'cap_impact': format_currency(cap_impact * -1) if cap_impact > 0 else '$0.00',
+            'occupancy_factor': f"{float(avg_occupancy):.4f}",
+            # For override amount, preserve the sign for proper display
             'override_amount': format_currency(override_impact),
             'override_description': override_desc,
-            'occupancy_factor': f"{float(avg_occupancy):.4f}",
             'final_tenant_amount': format_currency(final_tenant_amount),
             'inclusion_categories': inclusion_categories,
             'exclusion_categories': exclusion_categories
@@ -2194,7 +2235,18 @@ def generate_gl_detail_report(
         totals['tenant_share_amount'] = totals.get('tenant_share_amount', Decimal('0')) + tenant_share_amount
         totals['base_year_impact'] = totals.get('base_year_impact', Decimal('0')) + base_year_impact
         totals['cap_impact'] = totals.get('cap_impact', Decimal('0')) + cap_impact
+        
+        # For override_amount, we track the sum of the individual override impacts
+        # This is just for verification - the final total will be set to the original override amount
+        # from custom_overrides.json
+        if 'calculated_override_total' not in totals:
+            totals['calculated_override_total'] = Decimal('0')
+        totals['calculated_override_total'] += override_impact
+        
+        # We'll set totals['override_amount'] based on the original override amount later
+        # (keep this here as a fallback, but it won't be used)
         totals['override_amount'] = totals.get('override_amount', Decimal('0')) + override_impact
+        
         totals['final_tenant_amount'] = totals.get('final_tenant_amount', Decimal('0')) + final_tenant_amount
 
     # Format totals row
@@ -2220,14 +2272,35 @@ def generate_gl_detail_report(
     totals['base_year_impact'] = format_currency(totals['base_year_impact'] * -1) if totals[
                                                                                          'base_year_impact'] > 0 else '$0.00'
     totals['cap_impact'] = format_currency(totals['cap_impact'] * -1) if totals['cap_impact'] > 0 else '$0.00'
+    # Ensure totals follow the same column order (occupancy first, then override)
     totals['override_amount'] = format_currency(totals['override_amount'])
 
     # Set total override description
     if has_override:
         # Get the actual override description from the custom overrides file
         override_info = get_tenant_override(tenant_id, property_id)
+        
+        # For verification, calculate the sum of all individual override impacts
+        calculated_total_override = sum(
+            to_decimal(row['override_amount'].replace('$', '').replace(',', '')) 
+            for row in report_rows if row.get('override_amount')
+        )
+        logger.debug(f"Sum of individual override impacts: {calculated_total_override}")
+        logger.debug(f"Original override amount: {override_info['override_amount']}")
+        
+        # The difference should be very small (rounding error only)
+        difference = abs(calculated_total_override - override_info['override_amount'])
+        if difference > Decimal('0.01'):
+            logger.warning(f"Override distribution has a significant discrepancy: {difference}")
+        
         if override_info['override_description']:
             totals['override_description'] = override_info['override_description']
+            
+            # IMPORTANT: There are two approaches here:
+            # 1. Set the total to exactly match the original override amount (preferred)
+            # 2. Use the sum of the individual override impacts (for verification)
+            # We're using approach #1 to ensure the total matches exactly
+            totals['override_amount'] = format_currency(override_info['override_amount'])
         else:
             # Fall back to generic description if no description available
             if override_adjustment < 0:
@@ -2263,6 +2336,13 @@ def generate_gl_detail_report(
         totals['final_tenant_amount'] = format_currency(
             to_decimal(totals['final_tenant_amount'].replace('$', '')) + capital_final_amount)
 
+    # Remove calculation-only fields before writing the CSV
+    # These fields are used for internal calculations but shouldn't be in the final output
+    calculation_fields = ['calculated_override_total', 'total_tenant_share_for_override', 'total_tenant_share_calculated']
+    for field in calculation_fields:
+        if field in totals:
+            del totals[field]
+    
     # Write CSV File
     with open(output_path, 'w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=columns)
@@ -2361,26 +2441,39 @@ def generate_csv_report(
         # Amortization summary
         'amortization_exists', 'amortization_total_amount', 'amortization_items_count',
     ]
+    
+    # Define a template for amortization fields that we'll use dynamically
+    # Instead of hardcoding 5 items, we'll add them based on actual data
+    amortization_fields = [
+        'description',
+        'total_amount',
+        'years',
+        'annual_amount',
+        'your_share'
+    ]
 
-    # Add columns for up to 5 amortization items
-    for i in range(1, 6):
-        columns.extend([
-            f'amortization_{i}_description',
-            f'amortization_{i}_total_amount',
-            f'amortization_{i}_years',
-            f'amortization_{i}_annual_amount',
-            f'amortization_{i}_your_share'
-        ])
-
+    # First, determine the maximum number of amortization items across all rows
+    max_amortization_items = 0
+    for row in report_rows:
+        # Get count from row or use expense count if available directly
+        item_count = int(row.get('amortization_items_count', '0') or '0')
+        max_amortization_items = max(max_amortization_items, item_count)
+    
+    # Dynamically add amortization item columns based on actual data
+    dynamic_columns = columns.copy()
+    for i in range(1, max_amortization_items + 1):
+        for field in amortization_fields:
+            dynamic_columns.append(f'amortization_{i}_{field}')
+    
     # Write the CSV file
     try:
         with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=columns)
+            writer = csv.DictWriter(csvfile, fieldnames=dynamic_columns)
             writer.writeheader()
 
             for row in report_rows:
                 # Filter the row to include only the defined columns
-                filtered_row = {col: row.get(col, '') for col in columns}
+                filtered_row = {col: row.get(col, '') for col in dynamic_columns}
                 writer.writerow(filtered_row)
 
         logger.info(f"Generated enhanced CSV report with {len(report_rows)} rows: {output_path}")
@@ -2548,8 +2641,10 @@ def calculate_tenant_reconciliation(
     occupancy_adjusted_amount = apply_occupancy_adjustment(subtotal_after_tenant_share, occupancy_factors)
 
     # STEP 12: Apply any tenant override
+    # IMPORTANT: The override amount is used exactly as it appears in custom_overrides.json
+    # with no scaling or adjustments based on the description or reconciliation periods
     override_info = get_tenant_override(tenant_id, property_id)
-    override_amount = override_info['override_amount']
+    override_amount = override_info['override_amount']  # Use the raw value directly
 
     # Calculate base billing (before override)
     base_billing = occupancy_adjusted_amount
@@ -2795,8 +2890,8 @@ def calculate_tenant_reconciliation(
         'amortization_items_count': str(capital_expenses_result['expense_count']),
     }
 
-    # Add individual amortization items (up to 5)
-    for i, expense in enumerate(capital_expenses_result['capital_expenses'][:5], 1):
+    # Add all amortization items dynamically (no arbitrary limit)
+    for i, expense in enumerate(capital_expenses_result['capital_expenses'], 1):
         tenant_share_of_expense = expense.get('prorated_amount', Decimal('0')) * tenant_share_percentage
         report_row.update({
             f'amortization_{i}_description': expense.get('description', ''),
@@ -2804,16 +2899,6 @@ def calculate_tenant_reconciliation(
             f'amortization_{i}_years': str(expense.get('amortization_years', 0)),
             f'amortization_{i}_annual_amount': format_currency(expense.get('annual_amount', 0)),
             f'amortization_{i}_your_share': format_currency(tenant_share_of_expense)
-        })
-
-    # Fill empty columns for any remaining slots (if less than 5 expenses)
-    for i in range(len(capital_expenses_result['capital_expenses']) + 1, 6):
-        report_row.update({
-            f'amortization_{i}_description': '',
-            f'amortization_{i}_total_amount': '',
-            f'amortization_{i}_years': '',
-            f'amortization_{i}_annual_amount': '',
-            f'amortization_{i}_your_share': ''
         })
 
     # Return comprehensive results
