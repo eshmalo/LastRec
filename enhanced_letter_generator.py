@@ -584,9 +584,22 @@ Difference per Month & \\${monthly_diff} \\\\
                 print(f"DEBUG [GL {gl_account}]: Empty description, using GL account as fallback: '{description}'")
             
             
-            gl_amount = format_currency(row.get("combined_gross", "0"))
-            tenant_gl_share = format_currency(row.get("tenant_share_amount", "0"))
-            gl_admin_fee = format_currency(row.get("admin_fee_amount", "0"))
+            # Get raw values for calculations
+            gl_amount_raw = float(row.get("combined_gross", "0").strip('$').replace(',', '') or 0)
+            tenant_share_pct = float(row.get("tenant_share_percentage", "0").strip('%') or 0) / 100
+            admin_fee_pct = float(row.get("admin_fee_percentage", "0").strip('%') or 0) / 100
+            
+            # Calculate tenant's share of GL amount (without admin fee)
+            tenant_gl_amount = gl_amount_raw * tenant_share_pct
+            
+            # Calculate tenant's share of admin fee
+            property_admin_fee = gl_amount_raw * admin_fee_pct
+            tenant_admin_fee = property_admin_fee * tenant_share_pct
+            
+            # Format for display
+            gl_amount = format_currency(gl_amount_raw)
+            tenant_gl_share = format_currency(tenant_gl_amount)
+            gl_admin_fee = format_currency(tenant_admin_fee)
             gl_cap_impact = format_currency(row.get("cap_impact", "0"))
             
             # Skip rows with zero amounts
