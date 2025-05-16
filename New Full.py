@@ -629,10 +629,10 @@ def load_gl_data(property_id: str) -> List[Dict[str, Any]]:
     try:
         gl_data = load_json(GL_DATA_PATH)
 
-        # Filter for the specific property
+        # Filter for the specific property (case-insensitive)
         property_gl = [
             transaction for transaction in gl_data
-            if transaction.get('Property ID') == property_id
+            if transaction.get('Property ID', '').upper() == property_id.upper()
         ]
 
         # Standardize and convert numeric fields for all transactions
@@ -732,18 +732,67 @@ def filter_gl_accounts_with_detail(
     # NEW: Track GL line detail for reporting with complete tracking
     gl_line_details = {}  # gl_account -> detailed info
     gl_account_names = {}  # gl_account -> description
+    negative_balance_gl_accounts = {}  # Track GL accounts with negative balances
+
+    # First pass: Calculate total amounts per GL account across all periods for included accounts only
+    gl_account_totals = {}  # Track total amount per GL account
+    for transaction in gl_data:
+        gl_account = transaction.get('GL Account', '')
+        period = transaction.get('PERIOD', '')
+        net_amount = to_decimal(transaction.get('Net Amount', Decimal('0')))
+        
+        # Skip invalid transactions or outside recon periods
+        if not gl_account or not period or net_amount == 0 or str(period) not in recon_periods:
+            continue
+            
+        # Check if this GL account would be included in ANY category
+        is_included_anywhere = False
+        included_in_categories = []
+        for category in categories:
+            if check_account_inclusion(gl_account, inclusions.get(category, [])):
+                is_included_anywhere = True
+                included_in_categories.append(category)
+                
+        # Only accumulate totals for accounts that would be included
+        if is_included_anywhere:
+            logger.debug(f"GL account {gl_account} included in categories: {included_in_categories}")
+            if gl_account not in gl_account_totals:
+                gl_account_totals[gl_account] = Decimal('0')
+            gl_account_totals[gl_account] += net_amount
+        else:
+            logger.debug(f"GL account {gl_account} not included in any category - skipping")
 
     # Process transactions
     for transaction in gl_data:
         gl_account = transaction.get('GL Account', '')
         period = transaction.get('PERIOD', '')
         net_amount = to_decimal(transaction.get('Net Amount', Decimal('0')))
-        # Use GL Description instead of Description field
-        description = transaction.get('GL Description', '')
+        # Use GL Description, fall back to Line Description if GL Description is empty
+        description = transaction.get('GL Description', '').strip()
+        if not description:
+            description = transaction.get('Line Description', '').strip()
 
         # Skip invalid transactions or outside recon periods
         if not gl_account or not period or net_amount == 0 or str(period) not in recon_periods:
             continue
+
+        # Check if this GL account would be included somewhere and has negative total
+        if gl_account in gl_account_totals and gl_account_totals[gl_account] < 0:
+            if gl_account not in negative_balance_gl_accounts:
+                # Track which categories this account was included in
+                included_categories = []
+                for category in categories:
+                    if check_account_inclusion(gl_account, inclusions.get(category, [])):
+                        included_categories.append(category)
+                        
+                negative_balance_gl_accounts[gl_account] = {
+                    'description': description,
+                    'total_amount': gl_account_totals[gl_account],
+                    'periods': {},
+                    'included_in_categories': included_categories
+                }
+            negative_balance_gl_accounts[gl_account]['periods'][period] = net_amount
+            continue  # Skip this transaction from all calculations
 
         # Store GL account description
         if gl_account not in gl_account_names and description:
@@ -911,6 +960,12 @@ def filter_gl_accounts_with_detail(
         if excluded_accounts[category]:
             logger.info(f"  Excluded accounts: {sorted(excluded_accounts[category])}")
 
+    # Log negative balance GL accounts if any
+    if negative_balance_gl_accounts:
+        logger.info(f"Found {len(negative_balance_gl_accounts)} included GL accounts with negative total balances (excluded from calculations):")
+        for gl_account, detail in negative_balance_gl_accounts.items():
+            logger.info(f"  GL {gl_account} ({detail['description']}): Total: {float(detail['total_amount']):.2f}")
+
     # Return comprehensive results with GL line details
     return {
         'gross_entries': gross_entries,
@@ -923,6 +978,7 @@ def filter_gl_accounts_with_detail(
         'excluded_accounts': excluded_accounts,
         'gl_line_details': gl_line_details,  # Enhanced tracking
         'gl_account_names': gl_account_names,
+        'negative_balance_gl_accounts': negative_balance_gl_accounts,  # Accounts excluded for negative balance
         'settings_used': settings  # Include settings for reference
     }
 
@@ -2336,6 +2392,28 @@ def generate_gl_detail_report(
     totals['inclusion_categories'] = 'Multiple'
     totals['exclusion_categories'] = 'Multiple'
 
+    # Add negative balance GL accounts section
+    negative_balance_gl_accounts = gl_filtered_data.get('negative_balance_gl_accounts', {})
+    if negative_balance_gl_accounts:
+        # Add separator row
+        separator_row = {col: '' for col in columns}
+        separator_row['gl_account'] = '--- NEGATIVE BALANCE ACCOUNTS (EXCLUDED) ---'
+        separator_row['description'] = 'These included GL accounts were excluded from calculations due to negative total balances'
+        report_rows.append(separator_row)
+        
+        # Add each negative balance GL account
+        for gl_account, detail in sorted(negative_balance_gl_accounts.items()):
+            neg_row = {col: '' for col in columns}
+            neg_row['gl_account'] = gl_account
+            neg_row['description'] = detail['description']
+            neg_row['combined_gross'] = format_currency(detail['total_amount'])
+            neg_row['combined_net'] = format_currency(detail['total_amount'])
+            included_cats = detail.get('included_in_categories', [])
+            neg_row['inclusion_categories'] = ', '.join(included_cats) if included_cats else 'Unknown'
+            neg_row['exclusion_categories'] = 'NEGATIVE BALANCE'
+            neg_row['final_tenant_amount'] = '$0.00'
+            report_rows.append(neg_row)
+
     # Add capital expenses row if applicable
     capital_expenses_total = tenant_result['capital_expenses_result']['total_capital_expenses']
     if capital_expenses_total > 0:
@@ -3056,7 +3134,8 @@ def process_property_reconciliation(
         'tenant_results': tenant_results,
         'csv_report_path': csv_report_path,
         'json_report_path': json_report_path,
-        'gl_detail_reports': gl_detail_reports
+        'gl_detail_reports': gl_detail_reports,
+        'gl_dir': os.path.join(GL_DETAILS_PATH, f"{property_id}_{recon_year}")  # Pass directory containing GL detail CSVs
     }
     
     # Generate letters if requested

@@ -268,13 +268,21 @@ def find_gl_detail_file(tenant_id, gl_detail_dir):
     if matching_files:
         # Sort files by timestamp in filename (most recent last)
         # The format is GL_detail_{tenant_id}_{recon_year}_{timestamp}.csv
-        # Explicitly sort by the timestamp part for more reliable sorting
+        # where timestamp is in format YYYYMMDD_HHMMSS
         try:
-            # If timestamps are in the format YYYYMMDD_HHMMSS
-            matching_files.sort(key=lambda f: f.split('_')[-2] + '_' + f.split('_')[-1].split('.')[0])
-        except Exception:
-            # If the standard sort fails, just do a simple string sort
-            matching_files.sort()
+            # Extract timestamp from filename and sort
+            def extract_timestamp(filename):
+                # Split by underscore and get the parts after "GL_detail_{tenant_id}_{recon_year}_"
+                parts = filename.replace('.csv', '').split('_')
+                if len(parts) >= 5:  # GL_detail_TENANT_YEAR_DATE_TIME
+                    return parts[-2] + parts[-1]  # Concatenate date and time parts
+                return filename  # Fallback to filename if format doesn't match
+            
+            matching_files.sort(key=extract_timestamp)
+        except Exception as e:
+            print(f"DEBUG [find_gl]: Error sorting by timestamp, using fallback sort: {str(e)}")
+            # Fallback: sort by modification time
+            matching_files.sort(key=lambda f: os.path.getmtime(os.path.join(gl_detail_dir, f)))
         
         # Select the most recent file (last after sorting)
         most_recent_file = matching_files[-1]
@@ -433,6 +441,8 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
 \\usepackage{{array}}
 \\usepackage{{xcolor}}
 \\usepackage{{fancyhdr}}
+\\usepackage{{adjustbox}}
+\\usepackage{{makecell}}
 
 % Set up fancy headers/footers
 \\pagestyle{{fancy}}
@@ -477,13 +487,9 @@ Tenant's Pro-Rata Share ({tenant_pro_rata}\\%) & \\${tenant_share} \\\\
     document += f"""\\midrule
 Total Due for Year & \\${year_due} \\\\
 Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
-\\midrule
-{reconciliation_year} Reconciliation Amount & \\${main_period_balance} \\\\
 """
 
-    # Add catchup and override lines if needed
-    if has_catchup:
-        document += f"{catchup_period_range} Catchup Period & \\${catchup_balance} \\\\\n"
+    # Add override line if needed (right after Previously Billed)
     if has_override:
         # Negative amounts need special handling
         if override_amount.startswith('-'):
@@ -491,6 +497,14 @@ Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
             document += f"{override_description} & -\\${override_value} \\\\\n"
         else:
             document += f"{override_description} & \\${override_amount} \\\\\n"
+
+    document += f"""\\midrule
+{reconciliation_year} Reconciliation Amount & \\${main_period_balance} \\\\
+"""
+
+    # Add catchup line if needed
+    if has_catchup:
+        document += f"{catchup_period_range} Catchup Period & \\${catchup_balance} \\\\\n"
 
     document += f"""\\midrule
 \\textbf{{ADDITIONAL AMOUNT DUE}} & \\textbf{{\\${grand_total}}} \\\\
@@ -563,24 +577,12 @@ Difference per Month & \\${monthly_diff} \\\\
             description = escape_latex(original_description)
             print(f"DEBUG [GL {gl_account}]: After LaTeX escaping: '{description}'")
             
-            # Use the GL account as a fallback if description is empty, but don't add any prefix
+            # Use the GL account as a fallback if description is empty
             if not description and gl_account:
                 description = gl_account
                 print(f"DEBUG [GL {gl_account}]: Description was empty, using GL account number instead")
                 print(f"DEBUG [GL {gl_account}]: Empty description, using GL account as fallback: '{description}'")
             
-            # If description is present but equals GL account, see if we can find a better description
-            # from any supplementary field that might exist in the CSV
-            if description == gl_account:
-                # Try alternate description fields that might exist in the CSV
-                alt_description = row.get("gl_desc", "")  # Check for a field called gl_desc
-                if not alt_description:
-                    alt_description = row.get("account_description", "")  # Try another potential field
-                
-                # If we found an alternate description, use it
-                if alt_description:
-                    description = escape_latex(alt_description)
-                    print(f"DEBUG [GL {gl_account}]: Found alternate description: '{alt_description}'")
             
             gl_amount = format_currency(row.get("combined_gross", "0"))
             tenant_gl_share = format_currency(row.get("tenant_share_amount", "0"))
@@ -592,6 +594,17 @@ Difference per Month & \\${monthly_diff} \\\\
                 print(f"DEBUG [GL {gl_account}]: Skipping row with zero amount")
                 continue
             
+            # Skip negative balance accounts
+            if row.get("exclusion_categories", "") == "NEGATIVE BALANCE":
+                print(f"DEBUG [GL {gl_account}]: Skipping negative balance account")
+                continue
+            
+            # Skip GL accounts with zero tenant share (excluded accounts)
+            tenant_share_value = float(row.get("tenant_share_amount", "0").strip('$').replace(',', '') or 0)
+            if tenant_share_value == 0:
+                print(f"DEBUG [GL {gl_account}]: Skipping excluded account with zero tenant share")
+                continue
+            
             # Check if excluded from admin fee or CAP
             is_admin_excluded = row.get("admin_fee_exclusion_rules", "").strip() != ""
             is_cap_excluded = row.get("cap_exclusion_rules", "").strip() != ""
@@ -601,18 +614,31 @@ Difference per Month & \\${monthly_diff} \\\\
             
             # Check if we only have the GL account number as description (no actual description text)
             if description == gl_account:
-                # Add "Account: " prefix to make it clear this is an account number when no description is available
-                formatted_desc = f"Account: {description}"
-                print(f"DEBUG [GL {gl_account}]: Description equals GL account, adding prefix: '{formatted_desc}'")
+                # Use just the GL account number without any prefix
+                formatted_desc = description
+                print(f"DEBUG [GL {gl_account}]: Description equals GL account, using GL account number: '{formatted_desc}'")
             else:
-                # We have a descriptive text - format it appropriately
-                # For long descriptions, make them fit on one line with small font
-                if len(description) > 30:
+                # Use standard LaTeX font size commands for better reliability
+                desc_len = len(description)
+                if desc_len > 50:
+                    # Very long descriptions need tiny font
+                    formatted_desc = f"\\tiny{{{description}}}"
+                    print(f"DEBUG [GL {gl_account}]: Using tiny font for very long description ({desc_len} chars): '{description}'")
+                elif desc_len > 40:
+                    # Long descriptions need scriptsize font
+                    formatted_desc = f"\\scriptsize{{{description}}}"
+                    print(f"DEBUG [GL {gl_account}]: Using scriptsize font for long description ({desc_len} chars): '{description}'")
+                elif desc_len > 30:
+                    # Moderate descriptions need footnotesize font
+                    formatted_desc = f"\\footnotesize{{{description}}}"
+                    print(f"DEBUG [GL {gl_account}]: Using footnotesize font for moderate description ({desc_len} chars): '{description}'")
+                elif desc_len > 25:
+                    # Slightly long descriptions need small font
                     formatted_desc = f"\\small{{{description}}}"
-                    print(f"DEBUG [GL {gl_account}]: Using small font for long description: '{description}'")
+                    print(f"DEBUG [GL {gl_account}]: Using small font for slightly long description ({desc_len} chars): '{description}'")
                 else:
                     formatted_desc = description
-                    print(f"DEBUG [GL {gl_account}]: Using standard format for description: '{formatted_desc}'")
+                    print(f"DEBUG [GL {gl_account}]: Using standard format for description ({desc_len} chars): '{formatted_desc}'")
             
             # Add row based on table structure
             if has_cap:
@@ -721,6 +747,61 @@ Difference per Month & \\${monthly_diff} \\\\
     compile_success = compile_to_pdf(document, str(pdf_path), str(tex_path))
     
     return compile_success, str(pdf_path), str(tex_path)
+
+def find_most_recent_csv_report(base_dir=None, property_id=None, recon_year=None):
+    """Find the most recent CSV report file based on timestamp in filename."""
+    if not base_dir:
+        # Default to standard output directory
+        base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Output", "Reports")
+    
+    print(f"DEBUG [find_csv]: Looking for CSV reports in {base_dir}")
+    
+    # Pattern to match: tenant_billing_{property_id}_{category}_{recon_year}_{timestamp}.csv
+    pattern_prefix = "tenant_billing_"
+    if property_id:
+        pattern_prefix += f"{property_id}_"
+    if recon_year:
+        pattern_prefix += f"*_{recon_year}_"
+    
+    matching_files = []
+    
+    try:
+        for root, dirs, files in os.walk(base_dir):
+            for filename in files:
+                if filename.startswith(pattern_prefix) and filename.endswith(".csv"):
+                    full_path = os.path.join(root, filename)
+                    matching_files.append(full_path)
+                    print(f"DEBUG [find_csv]: Found matching file: {filename}")
+    except Exception as e:
+        print(f"DEBUG [find_csv]: Error searching for CSV files: {str(e)}")
+        return None
+    
+    if not matching_files:
+        print(f"DEBUG [find_csv]: No matching CSV report files found")
+        return None
+    
+    # Sort files by timestamp extracted from filename
+    try:
+        def extract_timestamp(filepath):
+            filename = os.path.basename(filepath)
+            # Remove .csv extension and split by underscore
+            parts = filename.replace('.csv', '').split('_')
+            if len(parts) >= 2:
+                # Get the last two parts (date and time)
+                return parts[-2] + parts[-1]
+            return filename
+        
+        matching_files.sort(key=extract_timestamp)
+    except Exception as e:
+        print(f"DEBUG [find_csv]: Error sorting by timestamp, using modification time: {str(e)}")
+        # Fallback to modification time
+        matching_files.sort(key=os.path.getmtime)
+    
+    # Select the most recent file
+    most_recent_file = matching_files[-1]
+    print(f"DEBUG [find_csv]: Found {len(matching_files)} matching CSV files")
+    print(f"DEBUG [find_csv]: Selected MOST RECENT file: {most_recent_file}")
+    return most_recent_file
 
 def generate_letters_from_results(results_dict):
     """Generate letters from reconciliation results."""
@@ -846,11 +927,24 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Generate CAM reconciliation letters with LaTeX')
-    parser.add_argument('--csv', type=str, required=True, help='Path to reconciliation CSV file')
+    parser.add_argument('--csv', type=str, help='Path to reconciliation CSV file (if not provided, finds most recent)')
     parser.add_argument('--gl_dir', type=str, help='Directory containing GL detail CSV files')
+    parser.add_argument('--property', type=str, help='Property ID to filter reports (e.g., WAT)')
+    parser.add_argument('--year', type=str, help='Reconciliation year to filter reports (e.g., 2024)')
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug output')
     
     args = parser.parse_args()
+    
+    # Determine CSV report path
+    csv_report_path = args.csv
+    if not csv_report_path:
+        # Find the most recent CSV report
+        print("No CSV file specified. Looking for most recent report...")
+        csv_report_path = find_most_recent_csv_report(property_id=args.property, recon_year=args.year)
+        if not csv_report_path:
+            print("Error: No CSV report found. Please specify a CSV file with --csv")
+            return 0, 0
+        print(f"Using most recent CSV report: {csv_report_path}")
     
     # Print verbose debug info
     if args.gl_dir:
@@ -875,9 +969,9 @@ def main():
         except Exception as e:
             print(f"DEBUG [main]: Error exploring GL directory: {str(e)}")
     
-    # For standalone use
+    # Prepare results dictionary
     results_dict = {
-        'csv_report_path': args.csv,
+        'csv_report_path': csv_report_path,
         'gl_dir': args.gl_dir,  # Pass the GL directory directly
         'gl_detail_reports': [os.path.join(args.gl_dir, f) for f in os.listdir(args.gl_dir)] if args.gl_dir and os.path.exists(args.gl_dir) else []
     }
