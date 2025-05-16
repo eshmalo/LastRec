@@ -2,6 +2,16 @@
 Data/
 Input/
 Output/
+Letters/PDFs/
+
+# Generated files
+*.pdf
+*.tex
+test_*.pdf
+test_*.tex
+*_local.pdf
+*_local.tex
+test_curl.sh
 
 # Python files
 __pycache__/
