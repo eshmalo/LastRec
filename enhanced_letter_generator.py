@@ -35,6 +35,10 @@ def format_currency(amount):
     """Format amount as currency without $ sign."""
     try:
         if isinstance(amount, str):
+            # Check if this is a non-numeric value that shouldn't be formatted
+            if amount.strip() and not any(c.isdigit() or c in '.-$,' for c in amount):
+                return "0.00"  # Return default for non-numeric text values
+            
             # Remove any existing formatting
             value = float(amount.strip('$').replace(',', ''))
         else:
@@ -47,6 +51,10 @@ def format_percentage(value, precision=2):
     """Format value as percentage."""
     try:
         if isinstance(value, str):
+            # Check if this is a non-numeric value that shouldn't be formatted
+            if value.strip() and not any(c.isdigit() or c in '.-$%,' for c in value):
+                return "0.00"  # Return default for non-numeric text values
+                
             # Remove % sign if present
             value = float(value.strip('%'))
         else:
@@ -133,16 +141,72 @@ def get_gl_details_for_tenant(gl_detail_file):
             for i, row in enumerate(gl_details[:3]):  # First 3 rows
                 print(f"DEBUG [GL file]: Sample row {i+1} - GL account: '{row.get('gl_account', '')}', Description: '{row.get('description', '')}'")        
         
-        # Filter to remove the TOTAL row for processing individual rows
-        tenant_gl_details = [row for row in gl_details if row.get('gl_account', '').upper() != 'TOTAL']
-        
-        # Separately get the TOTAL row - check case-insensitively
+        # First, capture the TOTAL row separately before filtering
+        # This ensures we always have access to the TOTAL row even if it's in the NEGATIVE BALANCE section
         total_row = next((row for row in gl_details if row.get('gl_account', '').upper() == 'TOTAL'), {})
+        if total_row:
+            print(f"DEBUG [GL file]: Found TOTAL row before filtering: '{total_row.get('gl_account', '')}'")
+        
+        # Filter out any special rows (FORMULA EXPLANATIONS, NEGATIVE BALANCE section)
+        filtered_gl_details = []
+        formula_explanation_row = None
+        negative_balance_header = None
+        in_negative_balance_section = False
+        
+        for row in gl_details:
+            gl_account = row.get('gl_account', '')
+            description = row.get('description', '')
+            exclusion_categories = row.get('exclusion_categories', '')
+            
+            # Don't skip the TOTAL row regardless of where it is
+            if gl_account.upper() == 'TOTAL':
+                print(f"DEBUG [GL file]: Keeping TOTAL row in filtered details")
+                if not total_row:  # If we didn't capture it earlier
+                    total_row = row
+                continue  # Skip adding to filtered_gl_details as we've already captured it
+            
+            # Track if we're in the negative balance section
+            if "--- NEGATIVE BALANCE ACCOUNTS" in gl_account:
+                in_negative_balance_section = True
+                negative_balance_header = row
+                print(f"DEBUG [GL file]: Found NEGATIVE BALANCE ACCOUNTS header: '{gl_account}'")
+                continue
+            
+            # Capture the formula explanation row for reference
+            if gl_account == "FORMULA EXPLANATIONS:":
+                formula_explanation_row = row
+                print(f"DEBUG [GL file]: Found FORMULA EXPLANATIONS row: '{gl_account}'")
+                continue
+                
+            # Check for any rows with "Direct value" in combined_gross (formula explanations)
+            if row.get('combined_gross', '') == 'Direct value':
+                print(f"DEBUG [GL file]: Skipping row with 'Direct value' in combined_gross: '{gl_account}'")
+                continue
+                
+            # Skip rows with "NEGATIVE BALANCE" exclusion category
+            if exclusion_categories == "NEGATIVE BALANCE" or in_negative_balance_section:
+                print(f"DEBUG [GL file]: Skipping NEGATIVE BALANCE row: '{gl_account}'")
+                continue
+                
+            # Skip any non-numeric amounts
+            combined_gross = row.get('combined_gross', '0')
+            if isinstance(combined_gross, str) and combined_gross.strip() and not any(c.isdigit() or c in '.-$,' for c in combined_gross):
+                print(f"DEBUG [GL file]: Skipping row with non-numeric combined_gross: '{combined_gross}'")
+                continue
+                
+            filtered_gl_details.append(row)
+        
+        # All detail rows (excluding TOTAL)
+        tenant_gl_details = filtered_gl_details
+        
+        # If we still don't have a total row, try to find one with 'total' in description
+        if not total_row and filtered_gl_details:
+            total_row = next((row for row in filtered_gl_details if 'total' in str(row.get('description', '')).lower()), {})
         
         # If no TOTAL row found, look for any row that might be a summary
-        if not total_row and gl_details:
+        if not total_row and filtered_gl_details:
             # Check for a row with 'Total' or 'total' in description or gl_account
-            total_row = next((row for row in gl_details if 'total' in str(row.get('description', '')).lower() or 
+            total_row = next((row for row in filtered_gl_details if 'total' in str(row.get('description', '')).lower() or 
                              'total' in str(row.get('gl_account', '')).lower()), {})
             
         print(f"DEBUG [GL file]: Filtered to {len(tenant_gl_details)} non-TOTAL rows")
@@ -152,16 +216,26 @@ def get_gl_details_for_tenant(gl_detail_file):
         rows_with_amounts = []
         for row in tenant_gl_details:
             combined_gross = row.get('combined_gross', '0')
+            # Skip rows that are marked with Direct value which aren't actual data
+            if row.get('combined_gross', '') == 'Direct value':
+                print(f"DEBUG [GL file]: Skipping row with 'Direct value': {row.get('gl_account', '')}")
+                continue
+                
             # Convert to Decimal, handling formatting
             try:
                 if isinstance(combined_gross, str):
+                    # Skip non-numeric values
+                    if combined_gross.strip() and not any(c.isdigit() or c in '.-$,' for c in combined_gross):
+                        print(f"DEBUG [GL file]: Skipping row with non-numeric value: {combined_gross}")
+                        continue
+                        
                     combined_gross = combined_gross.replace('$', '').replace(',', '')
                 amount = float(combined_gross)
                 if amount != 0:
                     rows_with_amounts.append(row)
             except (ValueError, TypeError):
-                # If we can't parse the amount, include the row just in case
-                rows_with_amounts.append(row)
+                print(f"DEBUG [GL file]: Skipping row with non-parseable amount: {combined_gross}")
+                continue
         
         print(f"DEBUG [GL file]: Found {len(rows_with_amounts)} rows with non-zero amounts")
         
@@ -319,6 +393,22 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     tenant_id = tenant_data.get("tenant_id", "")
     tenant_name = tenant_data.get("tenant_name", "")
     
+    # Skip special rows that aren't real tenants
+    # Skip formula explanations rows
+    if tenant_id == "FORMULA EXPLANATIONS:" or "FORMULA EXPLANATIONS" in tenant_name:
+        print(f"  Skipping special entry: {tenant_id} - {tenant_name}")
+        return False, "", ""
+        
+    # Skip rows with "Direct value" which are explanations, not data
+    if tenant_id == "Direct value" or tenant_name == "Direct value":
+        print(f"  Skipping Direct value entry: {tenant_id} - {tenant_name}")
+        return False, "", ""
+        
+    # Skip negative balance rows
+    if "NEGATIVE BALANCE" in tenant_id or "NEGATIVE BALANCE" in tenant_name:
+        print(f"  Skipping negative balance entry: {tenant_id} - {tenant_name}")
+        return False, "", ""
+    
     if debug_mode:
         print(f"Generating letter for tenant {tenant_id} - {tenant_name}")
     
@@ -366,10 +456,11 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     tex_path = tex_dir / f"{safe_tenant_name}_{tenant_id}.tex"
     pdf_path = pdf_dir / f"{safe_tenant_name}_{tenant_id}.pdf"
     
-    # Extract financial values
-    property_total = format_currency(tenant_data.get("property_gl_total", "0"))
+    # Extract financial values - using cam_net_total instead of property_gl_total as per field mapping
+    property_total = format_currency(tenant_data.get("cam_net_total", tenant_data.get("property_gl_total", "0")))
     tenant_pro_rata = format_percentage(tenant_data.get("share_percentage", "0"))
-    tenant_share = format_currency(tenant_data.get("tenant_share_amount", "0"))
+    # tenant_share is calculated based on subtotal_after_tenant_share as per field mapping if available
+    tenant_share = format_currency(tenant_data.get("subtotal_after_tenant_share", tenant_data.get("tenant_share_amount", "0")))
     base_year_amount = format_currency(tenant_data.get("base_year_adjustment", "0"))
     cap_reduction = format_currency(tenant_data.get("cap_deduction", "0"))
     admin_fee = format_currency(tenant_data.get("admin_fee_net", "0"))
@@ -424,14 +515,18 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     gl_total_row = {}
     gl_detail_file = None
     if gl_detail_dir:
-        print(f"DEBUG [gl_breakdown]: Looking for GL detail file in {gl_detail_dir}")
-        gl_detail_file = find_gl_detail_file(tenant_id, gl_detail_dir)
-        if gl_detail_file:
-            print(f"DEBUG [gl_breakdown]: Found GL detail file: {gl_detail_file}")
-            gl_details, gl_total_row = get_gl_details_for_tenant(gl_detail_file)
-            print(f"DEBUG [gl_breakdown]: Got {len(gl_details)} GL detail rows and total row: {bool(gl_total_row)}")
-        else:
-            print(f"DEBUG [gl_breakdown]: No GL detail file found for tenant {tenant_id}")
+        try:
+            print(f"DEBUG [gl_breakdown]: Looking for GL detail file in {gl_detail_dir}")
+            gl_detail_file = find_gl_detail_file(tenant_id, gl_detail_dir)
+            if gl_detail_file:
+                print(f"DEBUG [gl_breakdown]: Found GL detail file: {gl_detail_file}")
+                gl_details, gl_total_row = get_gl_details_for_tenant(gl_detail_file)
+                print(f"DEBUG [gl_breakdown]: Got {len(gl_details)} GL detail rows and total row: {bool(gl_total_row)}")
+            else:
+                print(f"DEBUG [gl_breakdown]: No GL detail file found for tenant {tenant_id}")
+        except Exception as e:
+            print(f"DEBUG [gl_breakdown]: Error processing GL details: {str(e)}")
+            # Continue without GL details
     
     # Start building the LaTeX document with proper escaping
     document = f"""\\documentclass{{article}}
@@ -567,6 +662,13 @@ Difference per Month & \\${monthly_diff} \\\\
 \\midrule
 """
         
+        # Initialize variables to track column totals
+        total_gl_amount_raw = 0.0
+        total_tenant_gl_amount = 0.0
+        total_tenant_admin_fee = 0.0
+        total_cap_impact_raw = 0.0
+        total_final_amount = 0.0
+        
         # Add GL rows
         for row in gl_details:
             # Extract row values - ensure we're getting the GL account description from the file
@@ -574,6 +676,20 @@ Difference per Month & \\${monthly_diff} \\\\
             original_description = row.get("description", "")
             print(f"DEBUG [GL {gl_account}]: Original description from CSV: '{original_description}'")
             
+            # Skip specific rows that aren't actual GL accounts
+            if gl_account == "FORMULA EXPLANATIONS:":
+                print(f"DEBUG [GL {gl_account}]: Skipping formula explanations row")
+                continue
+                
+            if "--- NEGATIVE BALANCE ACCOUNTS" in gl_account:
+                print(f"DEBUG [GL {gl_account}]: Skipping negative balance accounts header")
+                continue
+                
+            # Skip rows with "Direct value" which are explanations, not data
+            if original_description == "Direct value" or row.get("combined_gross", "") == "Direct value":
+                print(f"DEBUG [GL {gl_account}]: Skipping Direct value row")
+                continue
+                
             description = escape_latex(original_description)
             print(f"DEBUG [GL {gl_account}]: After LaTeX escaping: '{description}'")
             
@@ -583,12 +699,32 @@ Difference per Month & \\${monthly_diff} \\\\
                 print(f"DEBUG [GL {gl_account}]: Description was empty, using GL account number instead")
                 print(f"DEBUG [GL {gl_account}]: Empty description, using GL account as fallback: '{description}'")
             
-            
-            # Get raw values for calculations
-            gl_amount_raw = float(row.get("combined_gross", "0").strip('$').replace(',', '') or 0)
-            tenant_share_pct = float(row.get("tenant_share_percentage", "0").strip('%') or 0) / 100
-            admin_fee_pct = float(row.get("admin_fee_percentage", "0").strip('%') or 0) / 100
-            
+            # Skip rows with non-numeric values in combined_gross
+            combined_gross = row.get("combined_gross", "0")
+            if isinstance(combined_gross, str) and combined_gross.strip() and not any(c.isdigit() or c in '.-$,' for c in combined_gross):
+                print(f"DEBUG [GL {gl_account}]: Skipping row with non-numeric value for combined_gross: '{combined_gross}'")
+                continue
+                
+            # Get raw values for calculations - with better error handling
+            try:
+                if isinstance(combined_gross, str):
+                    combined_gross = combined_gross.strip('$').replace(',', '')
+                gl_amount_raw = float(combined_gross or 0)
+                
+                tenant_share_pct_str = row.get("tenant_share_percentage", "0")
+                if isinstance(tenant_share_pct_str, str):
+                    tenant_share_pct_str = tenant_share_pct_str.strip('%').replace(',', '')
+                tenant_share_pct = float(tenant_share_pct_str or 0) / 100
+                
+                admin_fee_pct_str = row.get("admin_fee_percentage", "0")
+                if isinstance(admin_fee_pct_str, str):
+                    admin_fee_pct_str = admin_fee_pct_str.strip('%').replace(',', '')
+                admin_fee_pct = float(admin_fee_pct_str or 0) / 100
+                
+            except (ValueError, TypeError) as e:
+                print(f"DEBUG [GL {gl_account}]: Error parsing values: {str(e)}")
+                continue
+                
             # Calculate tenant's share of GL amount (without admin fee)
             tenant_gl_amount = gl_amount_raw * tenant_share_pct
             
@@ -600,10 +736,16 @@ Difference per Month & \\${monthly_diff} \\\\
             gl_amount = format_currency(gl_amount_raw)
             tenant_gl_share = format_currency(tenant_gl_amount)
             gl_admin_fee = format_currency(tenant_admin_fee)
-            gl_cap_impact = format_currency(row.get("cap_impact", "0"))
+            
+            # Handle cap impact
+            cap_impact_str = row.get("cap_impact", "0")
+            if isinstance(cap_impact_str, str):
+                cap_impact_str = cap_impact_str.strip('$').replace(',', '')
+            cap_impact_raw = float(cap_impact_str or 0)
+            gl_cap_impact = format_currency(cap_impact_raw)
             
             # Skip rows with zero amounts
-            if float(row.get("combined_gross", "0").strip('$').replace(',', '') or 0) == 0:
+            if gl_amount_raw == 0:
                 print(f"DEBUG [GL {gl_account}]: Skipping row with zero amount")
                 continue
             
@@ -613,14 +755,41 @@ Difference per Month & \\${monthly_diff} \\\\
                 continue
             
             # Skip GL accounts with zero tenant share (excluded accounts)
-            tenant_share_value = float(row.get("tenant_share_amount", "0").strip('$').replace(',', '') or 0)
-            if tenant_share_value == 0:
-                print(f"DEBUG [GL {gl_account}]: Skipping excluded account with zero tenant share")
+            try:
+                tenant_share_value_str = row.get("tenant_share_amount", "0")
+                if isinstance(tenant_share_value_str, str):
+                    tenant_share_value_str = tenant_share_value_str.strip('$').replace(',', '')
+                tenant_share_value = float(tenant_share_value_str or 0)
+                if tenant_share_value == 0:
+                    print(f"DEBUG [GL {gl_account}]: Skipping excluded account with zero tenant share")
+                    continue
+            except (ValueError, TypeError) as e:
+                print(f"DEBUG [GL {gl_account}]: Error parsing tenant share amount: {str(e)}")
                 continue
-            
+                
             # Check if excluded from admin fee or CAP
             is_admin_excluded = row.get("admin_fee_exclusion_rules", "").strip() != ""
             is_cap_excluded = row.get("cap_exclusion_rules", "").strip() != ""
+            
+            # Track totals for each column
+            total_gl_amount_raw += gl_amount_raw
+            total_tenant_gl_amount += tenant_gl_amount
+            total_tenant_admin_fee += tenant_admin_fee
+            total_cap_impact_raw += cap_impact_raw
+            
+            # Calculate and track the final amount for each row
+            if has_cap:
+                if is_cap_excluded:
+                    row_final_amount = tenant_gl_amount + tenant_admin_fee
+                else:
+                    row_final_amount = tenant_gl_amount - cap_impact_raw + tenant_admin_fee
+            else:
+                if is_admin_excluded:
+                    row_final_amount = tenant_gl_amount
+                else:
+                    row_final_amount = tenant_gl_amount + tenant_admin_fee
+                    
+            total_final_amount += row_final_amount
             
             print(f"DEBUG [GL {gl_account}]: Description: '{description}', GL account: '{gl_account}'")
             print(f"DEBUG [GL {gl_account}]: Description equals GL account? {description == gl_account}")
@@ -679,23 +848,25 @@ Difference per Month & \\${monthly_diff} \\\\
                     print(f"DEBUG [GL {gl_account}]: Adding standard row: '{latex_row.strip()}'")
                     document += latex_row
         
-        # Add total row
-        if gl_total_row:
-            total_expenses = format_currency(gl_total_row.get("combined_gross", "0"))
-            total_tenant_share = format_currency(gl_total_row.get("tenant_share_amount", "0"))
-            total_admin_fee = format_currency(gl_total_row.get("admin_fee_amount", "0"))
-            total_cap_impact = format_currency(gl_total_row.get("cap_impact", "0"))
-            
-            if has_cap:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_expenses}}} & \\textbf{{\\${total_tenant_share}}} & \\textbf{{-\\${total_cap_impact}}} & \\textbf{{\\${total_admin_fee}}} & \\textbf{{\\${year_due}}} \\\\\n"
-            else:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_expenses}}} & \\textbf{{\\${total_tenant_share}}} & \\textbf{{\\${total_admin_fee}}} & \\textbf{{\\${year_due}}} \\\\\n"
+        # Format the calculated column totals for display
+        total_gl_amount_formatted = format_currency(total_gl_amount_raw)
+        total_tenant_gl_share_formatted = format_currency(total_tenant_gl_amount)
+        total_admin_fee_formatted = format_currency(total_tenant_admin_fee)
+        total_cap_impact_formatted = format_currency(total_cap_impact_raw)
+        total_final_amount_formatted = format_currency(total_final_amount)
+        
+        print(f"DEBUG [GL totals]: Calculated totals from individual rows:")
+        print(f"DEBUG [GL totals]:   Total GL Amount: ${total_gl_amount_formatted}")
+        print(f"DEBUG [GL totals]:   Total Tenant Share: ${total_tenant_gl_share_formatted}")
+        print(f"DEBUG [GL totals]:   Total Admin Fee: ${total_admin_fee_formatted}")
+        print(f"DEBUG [GL totals]:   Total CAP Impact: ${total_cap_impact_formatted}")
+        print(f"DEBUG [GL totals]:   Total Final Amount: ${total_final_amount_formatted}")
+        
+        # Add the totals row using the calculated values
+        if has_cap:
+            document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_gl_amount_formatted}}} & \\textbf{{\\${total_tenant_gl_share_formatted}}} & \\textbf{{-\\${total_cap_impact_formatted}}} & \\textbf{{\\${total_admin_fee_formatted}}} & \\textbf{{\\${total_final_amount_formatted}}} \\\\\n"
         else:
-            # If no total row, use the summary values
-            if has_cap:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${property_total}}} & \\textbf{{\\${tenant_share}}} & \\textbf{{-\\${cap_reduction}}} & \\textbf{{\\${admin_fee}}} & \\textbf{{\\${year_due}}} \\\\\n"
-            else:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${property_total}}} & \\textbf{{\\${tenant_share}}} & \\textbf{{\\${admin_fee}}} & \\textbf{{\\${year_due}}} \\\\\n"
+            document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_gl_amount_formatted}}} & \\textbf{{\\${total_tenant_gl_share_formatted}}} & \\textbf{{\\${total_admin_fee_formatted}}} & \\textbf{{\\${total_final_amount_formatted}}} \\\\\n"
         
         document += "\\bottomrule\n\\end{tabular}\n\\end{center}\n\n"
 
@@ -820,17 +991,82 @@ def generate_letters_from_results(results_dict):
     """Generate letters from reconciliation results."""
     print("\nGenerating tenant letters from reconciliation results...")
 
-    # Extract the necessary paths
+    # Extract the necessary paths and settings
     csv_report_path = results_dict.get('csv_report_path', '')
     gl_detail_reports = results_dict.get('gl_detail_reports', [])
+    debug_mode = results_dict.get('debug_mode', False)
+    integration_mode = results_dict.get('integration_mode', False)
+    specific_tenant_id = results_dict.get('specific_tenant_id')
     
     # Get the explicitly provided GL directory (if any)
     explicit_gl_dir = results_dict.get('gl_dir')
     if explicit_gl_dir:
-        print(f"DEBUG [generate_letters]: Explicit GL directory provided: {explicit_gl_dir}")
+        print(f"GL directory provided: {explicit_gl_dir}")
     
+    # Print environment information in integration mode
+    if integration_mode:
+        print("\n=== Integration Mode Information ===")
+        print(f"Working directory: {os.getcwd()}")
+        print(f"CSV report: {csv_report_path}")
+        print(f"GL detail reports count: {len(gl_detail_reports)}")
+        if explicit_gl_dir:
+            print(f"GL directory exists: {os.path.exists(explicit_gl_dir)}")
+            if os.path.exists(explicit_gl_dir):
+                print(f"GL directory contents: {len(os.listdir(explicit_gl_dir))} items")
+        
     # Read the tenant data from the CSV
+    print(f"\nReading tenant data from: {csv_report_path}")
     tenant_data = read_csv_file(csv_report_path)
+    
+    # Print tenant data summary
+    print(f"Found {len(tenant_data)} rows in tenant data CSV")
+    
+    if debug_mode:
+        # Print a sample row to help with debugging
+        if tenant_data and len(tenant_data) > 0:
+            print("\n=== Sample Tenant Data (First Row) ===")
+            first_tenant = tenant_data[0]
+            print(f"Tenant ID: {first_tenant.get('tenant_id', 'NOT FOUND')}")
+            print(f"Tenant Name: {first_tenant.get('tenant_name', 'NOT FOUND')}")
+            print(f"Property ID: {first_tenant.get('property_id', 'NOT FOUND')}")
+            print(f"Share Percentage: {first_tenant.get('share_percentage', 'NOT FOUND')}")
+            
+            # Check for FORMULA EXPLANATIONS
+            if any("FORMULA EXPLANATIONS" in str(row.get('tenant_id', '')) or 
+                   "FORMULA EXPLANATIONS" in str(row.get('tenant_name', '')) 
+                   for row in tenant_data[:5]):
+                print("\nWARNING: FORMULA EXPLANATIONS row found in first 5 rows of tenant data!")
+                
+            # Check for Direct value
+            if any("Direct value" in str(row.get('tenant_id', '')) or 
+                   "Direct value" in str(row.get('tenant_name', ''))
+                   for row in tenant_data[:5]):
+                print("\nWARNING: Direct value row found in first 5 rows of tenant data!")
+    
+    # Filter out any special rows that aren't actual tenants
+    filtered_tenant_data = []
+    for tenant in tenant_data:
+        tenant_id = tenant.get("tenant_id", "")
+        tenant_name = tenant.get("tenant_name", "")
+        
+        # Skip formula explanations rows
+        if tenant_id == "FORMULA EXPLANATIONS:" or "FORMULA EXPLANATIONS" in tenant_name:
+            print(f"  Skipping special entry: {tenant_id} - {tenant_name}")
+            continue
+            
+        # Skip rows with "Direct value" which are explanations, not data
+        if tenant_id == "Direct value" or tenant_name == "Direct value":
+            print(f"  Skipping Direct value entry: {tenant_id} - {tenant_name}")
+            continue
+            
+        # Skip negative balance rows
+        if "NEGATIVE BALANCE" in tenant_id or "NEGATIVE BALANCE" in tenant_name:
+            print(f"  Skipping negative balance entry: {tenant_id} - {tenant_name}")
+            continue
+            
+        filtered_tenant_data.append(tenant)
+    
+    tenant_data = filtered_tenant_data
     
     # Find base GL detail directory
     gl_base_dir = None
@@ -877,58 +1113,86 @@ def generate_letters_from_results(results_dict):
         property_id = tenant.get("property_id", "")
         recon_year = tenant.get("reconciliation_year", "")
         
+        # Check for special entries that aren't real tenants
+        if tenant_id == "FORMULA EXPLANATIONS:" or "FORMULA EXPLANATIONS" in tenant_name:
+            print(f"  Skipping special entry: {tenant_id} - {tenant_name}")
+            continue
+            
+        # Skip rows with "Direct value" which are explanations, not data
+        if tenant_id == "Direct value" or tenant_name == "Direct value":
+            print(f"  Skipping Direct value entry: {tenant_id} - {tenant_name}")
+            continue
+            
+        # Skip tenants that don't match the specified tenant ID (if provided)
+        if specific_tenant_id and tenant_id != specific_tenant_id:
+            print(f"  Skipping tenant {tenant_id} (only processing {specific_tenant_id})")
+            continue
+            
         print(f"Processing tenant {tenant_id} ({tenant_name})...")
         
         # Create tenant-specific GL detail directory path
         tenant_gl_dir = None
         if gl_base_dir:
-            # Format should be: Output/Reports/GL_Details/WAT_2024/Tenant_1401_Mexico_Grill,_LLC
-            # First try with underscores in tenant name
-            tenant_dir_name = f"Tenant_{tenant_id}_{tenant_name.replace(' ', '_')}"
-            tenant_gl_dir = os.path.join(gl_base_dir, tenant_dir_name)
-            print(f"DEBUG [generate_letters]: Looking for tenant GL directory at {tenant_gl_dir}")
-            
-            if not os.path.exists(tenant_gl_dir):
-                print(f"DEBUG [generate_letters]: First attempt failed, trying alternative naming format")
-                # Try with just tenant ID
-                tenant_dir_name = f"Tenant_{tenant_id}"
+            try:
+                # Format should be: Output/Reports/GL_Details/WAT_2024/Tenant_1401_Mexico_Grill,_LLC
+                # First try with underscores in tenant name
+                tenant_dir_name = f"Tenant_{tenant_id}_{tenant_name.replace(' ', '_')}"
                 tenant_gl_dir = os.path.join(gl_base_dir, tenant_dir_name)
-                print(f"DEBUG [generate_letters]: Looking for GL dir with just tenant ID: {tenant_gl_dir}")
+                print(f"DEBUG [generate_letters]: Looking for tenant GL directory at {tenant_gl_dir}")
                 
                 if not os.path.exists(tenant_gl_dir):
-                    # As a last resort, directly search for GL files with this tenant ID
-                    print(f"DEBUG [generate_letters]: Directory not found, searching for any GL files with tenant ID {tenant_id}")
-                    # Do a manual search in the property's GL directory
-                    gl_files = []
-                    if os.path.exists(gl_base_dir):
-                        for root, dirs, files in os.walk(gl_base_dir):
-                            for file in files:
-                                if file.startswith(f"GL_detail_{tenant_id}_") and file.endswith(".csv"):
-                                    gl_files.append(os.path.join(root, file))
+                    print(f"DEBUG [generate_letters]: First attempt failed, trying alternative naming format")
+                    # Try with just tenant ID
+                    tenant_dir_name = f"Tenant_{tenant_id}"
+                    tenant_gl_dir = os.path.join(gl_base_dir, tenant_dir_name)
+                    print(f"DEBUG [generate_letters]: Looking for GL dir with just tenant ID: {tenant_gl_dir}")
                     
-                    if gl_files:
-                        # Use the directory of the first file found
-                        tenant_gl_dir = os.path.dirname(gl_files[0])
-                        print(f"DEBUG [generate_letters]: Found GL file in directory: {tenant_gl_dir}")
+                    if not os.path.exists(tenant_gl_dir):
+                        # As a last resort, directly search for GL files with this tenant ID
+                        print(f"DEBUG [generate_letters]: Directory not found, searching for any GL files with tenant ID {tenant_id}")
+                        # Do a manual search in the property's GL directory
+                        gl_files = []
+                        if os.path.exists(gl_base_dir):
+                            for root, dirs, files in os.walk(gl_base_dir):
+                                for file in files:
+                                    if file.startswith(f"GL_detail_{tenant_id}_") and file.endswith(".csv"):
+                                        gl_files.append(os.path.join(root, file))
+                        
+                        if gl_files:
+                            # Use the directory of the first file found
+                            tenant_gl_dir = os.path.dirname(gl_files[0])
+                            print(f"DEBUG [generate_letters]: Found GL file in directory: {tenant_gl_dir}")
+                        else:
+                            print(f"  Warning: No GL detail directory found for tenant {tenant_id} after extensive search")
+                            tenant_gl_dir = None
                     else:
-                        print(f"  Warning: No GL detail directory found for tenant {tenant_id} after extensive search")
-                        tenant_gl_dir = None
+                        print(f"DEBUG [generate_letters]: Found tenant GL directory with second attempt")
                 else:
-                    print(f"DEBUG [generate_letters]: Found tenant GL directory with second attempt")
-            else:
-                print(f"DEBUG [generate_letters]: Found tenant GL directory with first attempt")
+                    print(f"DEBUG [generate_letters]: Found tenant GL directory with first attempt")
+            except Exception as e:
+                print(f"DEBUG [generate_letters]: Error finding GL directory: {str(e)}")
+                tenant_gl_dir = None
         
         try:
             # Generate letter with tenant-specific GL detail directory
-            success, pdf_path, tex_path = generate_tenant_letter(tenant, tenant_gl_dir, debug_mode=True)
+            success, pdf_path, tex_path = generate_tenant_letter(tenant, tenant_gl_dir, debug_mode=debug_mode)
             
             if success:
                 successful += 1
                 print(f"  ✅ Letter generated successfully for tenant {tenant_id}")
+                print(f"    LaTeX file: {tex_path}")
+                print(f"    PDF file: {pdf_path}")
             else:
                 print(f"  ❌ Failed to compile PDF for tenant {tenant_id}")
+                if integration_mode:
+                    print(f"  Integration mode debugging:")
+                    print(f"    - Tenant data has {len(tenant.keys())} fields")
+                    print(f"    - GL directory exists: {os.path.exists(tenant_gl_dir) if tenant_gl_dir else 'No GL dir'}")
+                    print(f"    - Check for permission issues or write protection")
         except Exception as e:
             print(f"  ❌ Error generating letter for tenant {tenant_id}: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     print(f"\nLetter generation complete: {successful} of {total} letters generated successfully")
     print(f"Letters are saved in: {LETTERS_DIR}")
@@ -945,51 +1209,127 @@ def main():
     parser.add_argument('--property', type=str, help='Property ID to filter reports (e.g., WAT)')
     parser.add_argument('--year', type=str, help='Reconciliation year to filter reports (e.g., 2024)')
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug output')
+    parser.add_argument('--log_file', type=str, help='Path to save detailed debug logs')
+    parser.add_argument('--tenant_id', type=str, help='Process only a specific tenant ID')
+    parser.add_argument('--verify_csv', action='store_true', help='Verify CSV structure before processing')
+    parser.add_argument('--integration_mode', action='store_true', help='Add extra debugging for New Full.py integration')
     
     args = parser.parse_args()
+    
+    # Set up logging to file if requested
+    if args.log_file:
+        import logging
+        log_dir = os.path.dirname(args.log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
+        logging.basicConfig(
+            level=logging.DEBUG if args.debug else logging.INFO,
+            filename=args.log_file,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        # Also log to console
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        logging.getLogger('').addHandler(console)
+        
+        logging.info("=== Enhanced Letter Generator Starting ===")
+        logging.info(f"Arguments: {args}")
+    
+    # Print run information
+    print("\n===== ENHANCED LETTER GENERATOR =====")
+    print(f"Run date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Run mode: {'Integration with New Full.py' if args.integration_mode else 'Standalone'}")
+    print(f"Debug mode: {'Enabled' if args.debug else 'Disabled'}")
+    print(f"Script directory: {SCRIPT_DIR}")
     
     # Determine CSV report path
     csv_report_path = args.csv
     if not csv_report_path:
         # Find the most recent CSV report
-        print("No CSV file specified. Looking for most recent report...")
+        print("\nNo CSV file specified. Looking for most recent report...")
         csv_report_path = find_most_recent_csv_report(property_id=args.property, recon_year=args.year)
         if not csv_report_path:
             print("Error: No CSV report found. Please specify a CSV file with --csv")
             return 0, 0
         print(f"Using most recent CSV report: {csv_report_path}")
     
-    # Print verbose debug info
+    # Verify CSV structure if requested
+    if args.verify_csv and csv_report_path:
+        print("\n=== Verifying CSV Structure ===")
+        try:
+            with open(csv_report_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                print(f"CSV has {len(headers)} columns")
+                
+                # Check for crucial columns
+                required_columns = [
+                    "tenant_id", "tenant_name", "property_id", "share_percentage", 
+                    "cam_net_total", "admin_fee_net", "subtotal_after_tenant_share", "tenant_share_amount"
+                ]
+                
+                missing_columns = [col for col in required_columns if col not in headers]
+                if missing_columns:
+                    print(f"WARNING: CSV is missing required columns: {', '.join(missing_columns)}")
+                else:
+                    print("CSV has all required columns")
+                
+                # Check for formula explanations row
+                for i, row in enumerate(reader):
+                    if i < 5:  # Just check first few rows
+                        if row and "FORMULA EXPLANATIONS" in row[0]:
+                            print(f"WARNING: Found FORMULA EXPLANATIONS at row {i+2}")
+                            break
+        except Exception as e:
+            print(f"Error verifying CSV: {str(e)}")
+    
+    # Print verbose debug info for GL directory
     if args.gl_dir:
-        print(f"DEBUG [main]: GL_DIR specified: {args.gl_dir}")
+        print(f"\n=== GL Directory Information ===")
+        print(f"GL directory specified: {args.gl_dir}")
         try:
             if os.path.exists(args.gl_dir):
-                print(f"DEBUG [main]: GL directory exists")
+                print(f"GL directory exists")
                 # List directories
+                tenant_dirs = []
                 for item in os.listdir(args.gl_dir):
                     item_path = os.path.join(args.gl_dir, item)
                     if os.path.isdir(item_path):
-                        print(f"DEBUG [main]: Found subdirectory: {item}")
-                        # Look for tenant directories
                         if item.startswith("Tenant_"):
                             tenant_id = item.split("_")[1]
-                            print(f"DEBUG [main]: Found tenant directory for tenant {tenant_id}")
-                            # Check if it has CSV files
                             gl_files = [f for f in os.listdir(item_path) if f.endswith('.csv')]
-                            print(f"DEBUG [main]: Found {len(gl_files)} GL files in tenant directory")
+                            tenant_dirs.append((tenant_id, len(gl_files)))
+                
+                print(f"Found {len(tenant_dirs)} tenant directories")
+                for tenant_id, file_count in tenant_dirs[:5]:  # Show first 5
+                    print(f"  Tenant {tenant_id}: {file_count} GL files")
+                
+                if len(tenant_dirs) > 5:
+                    print(f"  ... and {len(tenant_dirs) - 5} more tenant directories")
             else:
-                print(f"DEBUG [main]: GL directory does not exist: {args.gl_dir}")
+                print(f"GL directory does not exist: {args.gl_dir}")
         except Exception as e:
-            print(f"DEBUG [main]: Error exploring GL directory: {str(e)}")
+            print(f"Error exploring GL directory: {str(e)}")
     
     # Prepare results dictionary
     results_dict = {
         'csv_report_path': csv_report_path,
         'gl_dir': args.gl_dir,  # Pass the GL directory directly
-        'gl_detail_reports': [os.path.join(args.gl_dir, f) for f in os.listdir(args.gl_dir)] if args.gl_dir and os.path.exists(args.gl_dir) else []
+        'gl_detail_reports': [os.path.join(args.gl_dir, f) for f in os.listdir(args.gl_dir)] 
+                             if args.gl_dir and os.path.exists(args.gl_dir) else [],
+        'debug_mode': args.debug,
+        'integration_mode': args.integration_mode,
+        'specific_tenant_id': args.tenant_id  # Process only a specific tenant if requested
     }
     
+    print("\n=== Starting Letter Generation ===")
     successful, total = generate_letters_from_results(results_dict)
+    
+    print(f"\n=== Letter Generation Complete ===")
+    print(f"Successfully generated: {successful} of {total} letters")
+    print(f"Letters saved in: {LETTERS_DIR}")
+    
     return successful, total
 
 if __name__ == "__main__":

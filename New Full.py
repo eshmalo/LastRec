@@ -1072,11 +1072,16 @@ def calculate_cam_tax_admin(
                 admin_fee_specific_exclusion_amount += exclusion_amount
                 admin_fee_eligible_cam_net -= exclusion_amount
     
-    # Calculate admin fee base and gross based on the already-adjusted admin fee eligible CAM net
+    # Calculate admin fee gross on the CAM net before admin-specific exclusions
+    admin_fee_gross_base = cam_net + capital_expenses_amount
+    admin_fee_gross = admin_fee_gross_base * admin_fee_percentage
+    
+    # Calculate admin fee net after applying admin-specific exclusions
     admin_fee_base_amount = admin_fee_eligible_cam_net + capital_expenses_amount
-    admin_fee_gross = admin_fee_base_amount * admin_fee_percentage
-    admin_fee_net = admin_fee_gross  # Since all exclusions are already applied
-    admin_fee_exclusions = (cam_net + capital_expenses_amount) * admin_fee_percentage - admin_fee_net
+    admin_fee_net = admin_fee_base_amount * admin_fee_percentage
+    
+    # Calculate the admin fee exclusions as the difference between gross and net
+    admin_fee_exclusions = admin_fee_gross - admin_fee_net
     
     # DEBUG: Log admin fee calculation details
     logger.info(f"Admin fee calculation debug:")
@@ -1085,18 +1090,28 @@ def calculate_cam_tax_admin(
     logger.info(f"  Admin Fee-specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
     logger.info(f"  Admin Fee eligible CAM Net: {float(admin_fee_eligible_cam_net):.2f}")
     logger.info(f"  Capital Expenses Amount: {float(capital_expenses_amount):.2f}")
-    logger.info(f"  Admin Fee Base: {float(admin_fee_base_amount):.2f}")
+    logger.info(f"  Admin Fee Gross Base: {float(admin_fee_gross_base):.2f}")
+    logger.info(f"  Admin Fee Net Base: {float(admin_fee_base_amount):.2f}")
     logger.info(f"  Admin Fee %: {float(admin_fee_percentage * 100):.2f}%")
-    logger.info(f"  Admin Fee Gross/Net: {float(admin_fee_gross):.2f}")
+    logger.info(f"  Admin Fee Gross: {float(admin_fee_gross):.2f}")
+    logger.info(f"  Admin Fee Exclusions: {float(admin_fee_exclusions):.2f}")
+    logger.info(f"  Admin Fee Net: {float(admin_fee_net):.2f}")
     
     if admin_fee_specific_exclusion_amount > 0:
         logger.info(f"Admin fee calculation details (with specific exclusions):")
-        logger.info(f"  CAM Net total: {float(cam_net):.2f}")
-        logger.info(f"  Less: Admin fee-specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
-        logger.info(f"  Admin Fee Eligible CAM Net: {float(admin_fee_eligible_cam_net):.2f}")
-        logger.info(f"  Plus: Capital expenses: {float(capital_expenses_amount):.2f}")
-        logger.info(f"  Admin Fee Base: {float(admin_fee_base_amount):.2f}")
-        logger.info(f"  Admin Fee (Base × {float(admin_fee_percentage * 100):.2f}%): {float(admin_fee_gross):.2f}")
+        logger.info(f"  Gross Calculation:")
+        logger.info(f"    CAM Net total: {float(cam_net):.2f}")
+        logger.info(f"    Plus: Capital expenses: {float(capital_expenses_amount):.2f}")
+        logger.info(f"    Admin Fee Gross Base: {float(admin_fee_gross_base):.2f}")
+        logger.info(f"    Admin Fee Gross (Base × {float(admin_fee_percentage * 100):.2f}%): {float(admin_fee_gross):.2f}")
+        logger.info(f"  Net Calculation:")
+        logger.info(f"    CAM Net total: {float(cam_net):.2f}")
+        logger.info(f"    Less: Admin fee-specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
+        logger.info(f"    Admin Fee Eligible CAM Net: {float(admin_fee_eligible_cam_net):.2f}")
+        logger.info(f"    Plus: Capital expenses: {float(capital_expenses_amount):.2f}")
+        logger.info(f"    Admin Fee Net Base: {float(admin_fee_base_amount):.2f}")
+        logger.info(f"    Admin Fee Net (Base × {float(admin_fee_percentage * 100):.2f}%): {float(admin_fee_net):.2f}")
+        logger.info(f"  Admin Fee Exclusions (Gross - Net): {float(admin_fee_exclusions):.2f}")
 
     # Determine if admin fee is included in cap and base year calculations
     include_in_cap = is_admin_fee_included_in(settings, 'cap')
@@ -1157,12 +1172,13 @@ def calculate_cam_tax_admin(
 
     logger.info(f"Admin fee calculations:")
     logger.info(f"  Percentage: {float(admin_fee_percentage) * 100:.2f}%")
-    logger.info(f"  Base amount (CAM + Capital): {float(admin_fee_base_amount):.2f}")
-    logger.info(f"    CAM gross: {float(cam_gross):.2f}")
+    logger.info(f"  Gross base amount (CAM + Capital): {float(admin_fee_gross_base):.2f}")
+    logger.info(f"    CAM net: {float(cam_net):.2f}")
     logger.info(f"    Capital expenses: {float(capital_expenses_amount):.2f}")
-    logger.info(f"  Gross: {float(admin_fee_gross):.2f}")
-    logger.info(f"  Exclusions: {float(admin_fee_exclusions):.2f}")
-    logger.info(f"  Net: {float(admin_fee_net):.2f}")
+    logger.info(f"  Gross admin fee: {float(admin_fee_gross):.2f}")
+    logger.info(f"  Admin fee exclusions: {float(admin_fee_exclusions):.2f}")
+    logger.info(f"  Net base amount (Eligible CAM + Capital): {float(admin_fee_base_amount):.2f}")
+    logger.info(f"  Net admin fee: {float(admin_fee_net):.2f}")
     logger.info(f"  In cap: {include_in_cap}, in base: {include_in_base}")
 
     # Return comprehensive results
@@ -2157,13 +2173,20 @@ def generate_gl_detail_report(
     logger.info(f"  Admin Fee Specific Exclusions: {admin_fee_specific_exclusion_amount}")
     logger.info(f"  Admin Fee Eligible CAM Net: {admin_fee_eligible_cam_net}")
     logger.info(f"  Admin Fee Percentage: {admin_fee_percentage}")
-    logger.info(f"  Total Admin Fee: {admin_fee_eligible_cam_net} × {admin_fee_percentage} = {total_admin_fee}")
-    logger.info(f"  Admin Fee Exclusions: {admin_fee_exclusions} (difference between admin fee with and without exclusions)")
+    
+    # Calculate both gross and net admin fee values
+    total_admin_fee_gross = total_cam_net * admin_fee_percentage
+    total_admin_fee_net = admin_fee_eligible_cam_net * admin_fee_percentage
+    total_admin_fee_exclusions = total_admin_fee_gross - total_admin_fee_net
+    
+    logger.info(f"  Total Admin Fee Gross: {total_cam_net} × {admin_fee_percentage} = {total_admin_fee_gross}")
+    logger.info(f"  Total Admin Fee Net: {admin_fee_eligible_cam_net} × {admin_fee_percentage} = {total_admin_fee_net}")
+    logger.info(f"  Admin Fee Exclusions: {total_admin_fee_exclusions} (difference between admin fee with and without exclusions)")
     
     # Store the admin fee values in the tenant_cam_tax_admin dictionary for CSV reporting
-    tenant_cam_tax_admin['admin_fee_gross'] = total_admin_fee
-    tenant_cam_tax_admin['admin_fee_net'] = total_admin_fee
-    tenant_cam_tax_admin['admin_fee_exclusions'] = admin_fee_exclusions
+    tenant_cam_tax_admin['admin_fee_gross'] = total_admin_fee_gross
+    tenant_cam_tax_admin['admin_fee_net'] = total_admin_fee_net
+    tenant_cam_tax_admin['admin_fee_exclusions'] = total_admin_fee_exclusions
     # Get capital expenses from the tenant result or use 0 if not available
     capital_expenses = tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0'))
     tenant_cam_tax_admin['admin_fee_base_amount'] = admin_fee_eligible_cam_net + capital_expenses  # Include capital expenses in base amount
@@ -2533,13 +2556,13 @@ def get_formula_for_field(field: str, data: Dict) -> str:
     
     # Admin fee calculations
     elif field == 'admin_fee_gross':
-        return "Admin fee eligible CAM net × admin fee percentage (CAM net after all exclusions)"
+        return "CAM net × admin fee percentage (before admin-specific exclusions)"
     
     elif field == 'admin_fee_net':
-        return "Admin fee calculation on eligible CAM net (all exclusions applied upfront)"
+        return "Admin fee eligible CAM net × admin fee percentage (after admin-specific exclusions)"
     
     elif field == 'admin_fee_exclusions':
-        return "Difference between admin fee on CAM net and admin fee on eligible CAM net (impact of admin-fee-specific exclusions)"
+        return "Admin fee gross - admin fee net (impact of admin-fee-specific exclusions)"
     
     elif field == 'admin_fee_base_amount':
         return "Admin fee eligible CAM net + capital expenses (base after all exclusions)"
