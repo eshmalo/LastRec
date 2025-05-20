@@ -704,9 +704,16 @@ def filter_gl_accounts_with_detail(
         gl_data: List[Dict[str, Any]],
         settings: Dict[str, Any],
         recon_periods: List[str],
-        categories: List[str] = ['cam', 'ret']
+        categories: List[str] = ['cam', 'ret'],
+        catchup_periods: List[str] = None
 ) -> Dict[str, Any]:
-    """Enhanced version of filter_gl_accounts that tracks detailed information for reporting."""
+    """Enhanced version of filter_gl_accounts that tracks detailed information for reporting.
+    
+    When catchup_periods are provided, the function uses reconciliation year data (recon_periods)
+    for GL filtering. This is because catch-up calculations should be based on the 
+    reconciliation year's GL data, not the catch-up period's actual GL data.
+    for GL filtering, which is needed for catch-up calculations.
+    """
     # Get inclusion/exclusion settings
     gl_settings = settings.get('settings', {})
     inclusions = gl_settings.get('gl_inclusions', {})
@@ -991,10 +998,18 @@ filter_gl_accounts = filter_gl_accounts_with_detail
 
 def calculate_admin_fee_percentage(settings: Dict[str, Any]) -> Decimal:
     """Calculate the admin fee percentage from settings with standardized handling."""
-    admin_fee_percentage_str = settings.get('settings', {}).get('admin_fee_percentage', '0')
+    # Get property ID to handle property-specific defaults
+    property_id = settings.get('property_id', '').upper()
+    
+    # Get admin fee percentage from settings
+    admin_fee_percentage_str = settings.get('settings', {}).get('admin_fee_percentage', '')
 
+    # Handle empty strings with property-specific defaults
     if not admin_fee_percentage_str or admin_fee_percentage_str == "":
-        return Decimal('0')
+        # Default to 15% for WAT property, 0% otherwise
+        if property_id == 'WAT':
+            return Decimal('0.15')
+        return Decimal('0')  # Default for other properties
 
     # Convert to decimal
     admin_fee_percentage = to_decimal(admin_fee_percentage_str)
@@ -1016,7 +1031,8 @@ def is_admin_fee_included_in(settings: Dict[str, Any], calculation_type: str) ->
 def calculate_cam_tax_admin(
         gl_filtered_data: Dict[str, Any],
         settings: Dict[str, Any],
-        categories: List[str] = ['cam', 'ret']
+        categories: List[str] = ['cam', 'ret'],
+        capital_expenses_amount: Decimal = Decimal('0')
 ) -> Dict[str, Any]:
     """Calculate CAM, TAX, and admin fee amounts with detailed tracking."""
     # Get amounts from filtered data
@@ -1041,43 +1057,46 @@ def calculate_cam_tax_admin(
     # Get admin_fee specific exclusions
     admin_fee_exclusions_list = settings.get('settings', {}).get('gl_exclusions', {}).get('admin_fee', [])
 
-    # Calculate admin fee gross (based on CAM gross)
-    admin_fee_gross = cam_gross * admin_fee_percentage
-
-    # Calculate admin fee net properly accounting for both CAM and admin_fee exclusions
+    # Calculate admin fee eligible CAM net by applying admin fee-specific exclusions upfront
+    admin_fee_eligible_cam_net = cam_net
+    admin_fee_specific_exclusion_amount = Decimal('0')
+    
+    # Apply admin_fee specific exclusions if they exist
     if admin_fee_exclusions_list:
-        # If there are specific admin_fee exclusions, we need to calculate the net amount
-        # by applying both CAM exclusions (inherited) and admin_fee specific exclusions
-
-        # Start with CAM net (already has CAM exclusions applied)
-        admin_fee_base = cam_net
-
-        # Now apply admin_fee specific exclusions (only on accounts not already excluded by CAM)
-        admin_fee_specific_exclusion_amount = Decimal('0')
-
         # Process CAM net entries to find additional admin_fee specific exclusions
         for entry in net_entries.get('cam', []):
             gl_account = entry.get('GL Account', '')
             if gl_account and check_account_exclusion(gl_account, admin_fee_exclusions_list):
                 # This account passes CAM exclusions but is specifically excluded from admin_fee
-                admin_fee_specific_exclusion_amount += entry.get('Net Amount', Decimal('0'))
-
-        # Calculate admin fee net by removing admin_fee specific exclusions from the base
-        admin_fee_net = (admin_fee_base - admin_fee_specific_exclusion_amount) * admin_fee_percentage
-
-        # Total admin fee exclusions
-        admin_fee_exclusions = admin_fee_gross - admin_fee_net
-
-        logger.info(f"Admin fee calculation with specific exclusions:")
-        logger.info(f"  CAM gross (base for admin fee gross): {float(cam_gross):.2f}")
-        logger.info(f"  CAM net (after CAM exclusions): {float(cam_net):.2f}")
-        logger.info(f"  Additional admin_fee specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
-        logger.info(
-            f"  Admin fee base after all exclusions: {float(admin_fee_base - admin_fee_specific_exclusion_amount):.2f}")
-    else:
-        # No specific admin_fee exclusions, so admin_fee just inherits CAM exclusions
-        admin_fee_net = cam_net * admin_fee_percentage
-        admin_fee_exclusions = admin_fee_gross - admin_fee_net
+                exclusion_amount = entry.get('Net Amount', Decimal('0'))
+                admin_fee_specific_exclusion_amount += exclusion_amount
+                admin_fee_eligible_cam_net -= exclusion_amount
+    
+    # Calculate admin fee base and gross based on the already-adjusted admin fee eligible CAM net
+    admin_fee_base_amount = admin_fee_eligible_cam_net + capital_expenses_amount
+    admin_fee_gross = admin_fee_base_amount * admin_fee_percentage
+    admin_fee_net = admin_fee_gross  # Since all exclusions are already applied
+    admin_fee_exclusions = (cam_net + capital_expenses_amount) * admin_fee_percentage - admin_fee_net
+    
+    # DEBUG: Log admin fee calculation details
+    logger.info(f"Admin fee calculation debug:")
+    logger.info(f"  CAM Gross: {float(cam_gross):.2f}")
+    logger.info(f"  CAM Net (after CAM exclusions): {float(cam_net):.2f}")
+    logger.info(f"  Admin Fee-specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
+    logger.info(f"  Admin Fee eligible CAM Net: {float(admin_fee_eligible_cam_net):.2f}")
+    logger.info(f"  Capital Expenses Amount: {float(capital_expenses_amount):.2f}")
+    logger.info(f"  Admin Fee Base: {float(admin_fee_base_amount):.2f}")
+    logger.info(f"  Admin Fee %: {float(admin_fee_percentage * 100):.2f}%")
+    logger.info(f"  Admin Fee Gross/Net: {float(admin_fee_gross):.2f}")
+    
+    if admin_fee_specific_exclusion_amount > 0:
+        logger.info(f"Admin fee calculation details (with specific exclusions):")
+        logger.info(f"  CAM Net total: {float(cam_net):.2f}")
+        logger.info(f"  Less: Admin fee-specific exclusions: {float(admin_fee_specific_exclusion_amount):.2f}")
+        logger.info(f"  Admin Fee Eligible CAM Net: {float(admin_fee_eligible_cam_net):.2f}")
+        logger.info(f"  Plus: Capital expenses: {float(capital_expenses_amount):.2f}")
+        logger.info(f"  Admin Fee Base: {float(admin_fee_base_amount):.2f}")
+        logger.info(f"  Admin Fee (Base × {float(admin_fee_percentage * 100):.2f}%): {float(admin_fee_gross):.2f}")
 
     # Determine if admin fee is included in cap and base year calculations
     include_in_cap = is_admin_fee_included_in(settings, 'cap')
@@ -1138,6 +1157,9 @@ def calculate_cam_tax_admin(
 
     logger.info(f"Admin fee calculations:")
     logger.info(f"  Percentage: {float(admin_fee_percentage) * 100:.2f}%")
+    logger.info(f"  Base amount (CAM + Capital): {float(admin_fee_base_amount):.2f}")
+    logger.info(f"    CAM gross: {float(cam_gross):.2f}")
+    logger.info(f"    Capital expenses: {float(capital_expenses_amount):.2f}")
     logger.info(f"  Gross: {float(admin_fee_gross):.2f}")
     logger.info(f"  Exclusions: {float(admin_fee_exclusions):.2f}")
     logger.info(f"  Net: {float(admin_fee_net):.2f}")
@@ -1158,6 +1180,8 @@ def calculate_cam_tax_admin(
         'admin_fee_exclusions': admin_fee_exclusions,
         'admin_fee_net': admin_fee_net,
         'admin_fee_exclusions_list': admin_fee_exclusions_list,  # Added to pass specific admin fee exclusion list
+        'admin_fee_base_amount': admin_fee_base_amount,  # CAM + Capital expenses
+        'capital_expenses_in_admin': capital_expenses_amount,  # Amount of capital expenses included in admin fee
 
         'combined_gross_total': combined_gross_total,
         'combined_exclusions': combined_exclusions,
@@ -1503,7 +1527,8 @@ def update_cap_history(
 def calculate_capital_expenses(
         settings: Dict[str, Any],
         recon_year: int,
-        periods: List[str]
+        periods: List[str],
+        tenant_share_percentage: Optional[Decimal] = None
 ) -> Dict[str, Any]:
     """Calculate amortized capital expenses for the reconciliation with detailed reporting."""
     # Get capital expenses from settings
@@ -1528,6 +1553,7 @@ def calculate_capital_expenses(
     # Calculate amortized amount for each expense
     amortized_expenses = []
     total_capital_expense = Decimal('0')
+    total_property_expense = Decimal('0')  # Track property-level total
     expense_count = 0
 
     for expense_id, expense in merged_expenses.items():
@@ -1552,8 +1578,27 @@ def calculate_capital_expenses(
         # Calculate annual amortized amount
         annual_amount = expense_amount / amort_years
 
+        # Get tenant share percentage if applicable
+        if tenant_share_percentage is not None:
+            # Use the provided tenant share percentage (e.g., 1.74% = 0.0174)
+            tenant_allocation_percentage = tenant_share_percentage
+        elif 'tenant_id' in settings:
+            # Fallback to square footage calculation if percentage not provided
+            property_sf = to_decimal(settings.get('total_rsf', '0'))
+            tenant_sf = to_decimal(settings.get('settings', {}).get('square_footage', '0'))
+            
+            if property_sf > 0 and tenant_sf > 0:
+                tenant_allocation_percentage = tenant_sf / property_sf
+            else:
+                tenant_allocation_percentage = Decimal('1')  # Default to 100%
+        else:
+            tenant_allocation_percentage = Decimal('1')  # Default to 100%
+
+        # Calculate tenant's share
+        tenant_annual_share = annual_amount * tenant_allocation_percentage
+        
         # Apply proration based on occupancy if tenant settings are provided
-        prorated_amount = annual_amount
+        prorated_amount = tenant_annual_share  # Start with tenant's share, not full amount
         if 'tenant_id' in settings:
             lease_start = settings.get('lease_start')
             lease_end = settings.get('lease_end')
@@ -1565,20 +1610,7 @@ def calculate_capital_expenses(
                 # Calculate average occupancy
                 if occupancy_factors:
                     avg_occupancy = sum(occupancy_factors.values()) / Decimal(len(periods))
-                    prorated_amount = annual_amount * avg_occupancy
-
-        # Get tenant share percentage if applicable
-        tenant_allocation_percentage = Decimal('1')  # Default to 100%
-        if 'tenant_id' in settings:
-            # Calculate based on tenant's share method
-            property_sf = to_decimal(settings.get('total_rsf', '0'))
-            tenant_sf = to_decimal(settings.get('settings', {}).get('square_footage', '0'))
-
-            if property_sf > 0 and tenant_sf > 0:
-                tenant_allocation_percentage = tenant_sf / property_sf
-
-        # Calculate tenant's share
-        tenant_annual_share = annual_amount * tenant_allocation_percentage
+                    prorated_amount = tenant_annual_share * avg_occupancy  # Apply to tenant's share
 
         # Add to amortized expenses if there's an amount
         if prorated_amount > 0:
@@ -1598,7 +1630,8 @@ def calculate_capital_expenses(
                 'tenant_annual_share': tenant_annual_share
             })
 
-            total_capital_expense += prorated_amount
+            total_capital_expense += prorated_amount  # Use prorated amount (after occupancy adjustment)
+            total_property_expense += annual_amount  # Track property-level total
             expense_count += 1
 
     logger.info(
@@ -1607,6 +1640,7 @@ def calculate_capital_expenses(
     return {
         'capital_expenses': amortized_expenses,
         'total_capital_expenses': total_capital_expense,
+        'total_property_expenses': total_property_expense,  # Property-level total
         'expense_count': expense_count,
         'has_amortization': expense_count > 0  # NEW
     }
@@ -1855,7 +1889,7 @@ def get_old_monthly_payment(tenant_id: str, property_id: str) -> Decimal:
         record_tenant_id = str(record.get('TenantID', ''))
         record_property_id = record.get('PropertyID', '')
 
-        if record_tenant_id == tenant_id_str and record_property_id == property_id:
+        if record_tenant_id == tenant_id_str and (record_property_id or '').lower() == (property_id or '').lower():
             # Get the MatchedEstimate value
             matched_estimate = record.get('MatchedEstimate', '')
 
@@ -1903,7 +1937,7 @@ def get_tenant_payments(
         if income_categories and income_category not in income_categories:
             continue
 
-        if record_tenant_id == tenant_id_str and record_property_id == property_id:
+        if record_tenant_id == tenant_id_str and (record_property_id or '').lower() == (property_id or '').lower():
             # Extract the period from BillingMonth (e.g., "2024-05" -> "202405")
             billing_month = record.get('BillingMonth', '')
             if billing_month:
@@ -2086,11 +2120,11 @@ def generate_gl_detail_report(
     # Get admin_fee specific exclusions from tenant settings
     admin_fee_exclusions_list = tenant_cam_tax_admin.get('admin_fee_exclusions_list', [])
 
-    # Match the property report's admin fee calculation exactly
-    # Start with CAM net (already has CAM exclusions applied)
-    admin_fee_base = total_cam_net
-
-    # First pass to identify accounts excluded from admin fee and calculate total exclusion amount
+    # Calculate admin fee eligible CAM net directly
+    # Start with CAM net (after CAM exclusions) and apply admin fee-specific exclusions upfront
+    admin_fee_eligible_cam_net = total_cam_net
+    
+    # Process accounts for admin fee-specific exclusions
     if admin_fee_exclusions_list:
         for gl_account, gl_detail in sorted(gl_line_details.items()):
             cam_net = gl_detail['net'].get('cam', Decimal('0'))
@@ -2098,7 +2132,9 @@ def generate_gl_detail_report(
                 # This account is excluded from admin fee
                 admin_fee_excluded_accounts.add(gl_account)
                 admin_fee_specific_exclusion_amount += cam_net
-                # Track which admin fee exclusion rules matched
+                admin_fee_eligible_cam_net -= cam_net  # Deduct from eligible amount immediately
+                
+                # Track which admin fee exclusion rules matched for reporting
                 for rule in admin_fee_exclusions_list:
                     if check_account_exclusion(gl_account, [rule]):
                         if 'exclusion_rules' not in gl_line_details[gl_account]:
@@ -2107,23 +2143,28 @@ def generate_gl_detail_report(
                             gl_line_details[gl_account]['exclusion_rules']['admin_fee'] = []
                         gl_line_details[gl_account]['exclusion_rules']['admin_fee'].append(rule)
                 logger.debug(f"GL account {gl_account} excluded from admin fee due to specific admin fee exclusions")
-
-        # Calculate admin fee eligible CAM net by subtracting specific exclusions
-        cam_net_eligible_for_admin_fee = admin_fee_base - admin_fee_specific_exclusion_amount
-    else:
-        # No specific admin fee exclusions, so all CAM net is eligible
-        cam_net_eligible_for_admin_fee = admin_fee_base
-
-    # Calculate the total admin fee (property report style - on the total eligible CAM net)
-    total_admin_fee = cam_net_eligible_for_admin_fee * admin_fee_percentage
+    
+    # Calculate the total admin fee directly on the eligible CAM net
+    total_admin_fee = admin_fee_eligible_cam_net * admin_fee_percentage
+    
+    # Calculate the admin fee exclusions value (for reporting consistency)
+    # This represents the difference between admin fee calculated without exclusions and with exclusions
+    admin_fee_exclusions = (total_cam_net * admin_fee_percentage) - total_admin_fee
 
     # Enhanced logging to debug admin fee calculations
     logger.info(f"Property report style admin fee calculation: ")
     logger.info(f"  CAM Net Total: {total_cam_net}")
-    logger.info(f"  Admin Fee Exclusions: {admin_fee_specific_exclusion_amount}")
-    logger.info(f"  Admin Fee Base (eligible CAM): {cam_net_eligible_for_admin_fee}")
+    logger.info(f"  Admin Fee Specific Exclusions: {admin_fee_specific_exclusion_amount}")
+    logger.info(f"  Admin Fee Eligible CAM Net: {admin_fee_eligible_cam_net}")
     logger.info(f"  Admin Fee Percentage: {admin_fee_percentage}")
-    logger.info(f"  Total Admin Fee: {cam_net_eligible_for_admin_fee} × {admin_fee_percentage} = {total_admin_fee}")
+    logger.info(f"  Total Admin Fee: {admin_fee_eligible_cam_net} × {admin_fee_percentage} = {total_admin_fee}")
+    logger.info(f"  Admin Fee Exclusions: {admin_fee_exclusions} (difference between admin fee with and without exclusions)")
+    
+    # Store the admin fee values in the tenant_cam_tax_admin dictionary for CSV reporting
+    tenant_cam_tax_admin['admin_fee_gross'] = total_admin_fee
+    tenant_cam_tax_admin['admin_fee_net'] = total_admin_fee
+    tenant_cam_tax_admin['admin_fee_exclusions'] = admin_fee_exclusions
+    tenant_cam_tax_admin['admin_fee_base_amount'] = admin_fee_eligible_cam_net
 
     # Process each GL account
     for gl_account, gl_detail in sorted(gl_line_details.items()):
@@ -2141,18 +2182,21 @@ def generate_gl_detail_report(
         combined_net = cam_net + ret_net
 
         # Calculate admin fee for this GL line using our pre-calculated total admin fee
+        # Calculate admin fee for this GL line
         admin_fee_amount = Decimal('0')
-        if cam_net_eligible_for_admin_fee > 0 and cam_net > 0 and gl_account not in admin_fee_excluded_accounts:
-            # Distribute the total admin fee proportionally based on this GL line's contribution
-            # to the eligible CAM net
-            admin_fee_amount = (cam_net / cam_net_eligible_for_admin_fee) * total_admin_fee
+        property_admin_fee_amount = Decimal('0')
+        if admin_fee_eligible_cam_net > 0 and cam_net > 0 and gl_account not in admin_fee_excluded_accounts:
+            # First calculate the property-level admin fee for this GL line
+            property_admin_fee_amount = (cam_net / admin_fee_eligible_cam_net) * total_admin_fee
+            # Then calculate the tenant's share of this admin fee
+            admin_fee_amount = property_admin_fee_amount * tenant_share_percentage
 
-        # Total before proration
-        total_before_proration = combined_net + admin_fee_amount
-
-        # Apply tenant share with consistent rounding to match property report approach
-        tenant_share_amount = (total_before_proration * tenant_share_percentage).quantize(Decimal('0.000001'),
-                                                                                          rounding=ROUND_HALF_UP)
+        # Calculate tenant's share of the GL amount (without admin fee)
+        tenant_share_amount = (combined_net * tenant_share_percentage).quantize(Decimal('0.000001'),
+                                                                              rounding=ROUND_HALF_UP)
+        
+        # Total before proration (for later calculations, not for display)
+        total_before_proration = combined_net + property_admin_fee_amount
 
         # Calculate proportional base year impact
         base_year_impact = Decimal('0')
@@ -2192,8 +2236,8 @@ def generate_gl_detail_report(
                     # Calculate admin fee for this account
                     gl_admin_fee = Decimal('0')
                     is_excluded = gl_acct in admin_fee_excluded_accounts
-                    if not is_excluded and cam_net_eligible_for_admin_fee > 0 and gl_cam_net > 0:
-                        gl_admin_fee = (gl_cam_net / cam_net_eligible_for_admin_fee) * total_admin_fee
+                    if not is_excluded and admin_fee_eligible_cam_net > 0 and gl_cam_net > 0:
+                        gl_admin_fee = (gl_cam_net / admin_fee_eligible_cam_net) * total_admin_fee
                     
                     # Calculate total before proration
                     gl_before_proration = gl_combined_net + gl_admin_fee
@@ -2416,6 +2460,7 @@ def generate_gl_detail_report(
 
     # Add capital expenses row if applicable
     capital_expenses_total = tenant_result['capital_expenses_result']['total_capital_expenses']
+    tenant_share_percentage = tenant_result['tenant_share_percentage']
     if capital_expenses_total > 0:
         capital_row = {col: '' for col in columns}
         capital_row['gl_account'] = 'CAPITAL'
@@ -2451,8 +2496,99 @@ def generate_gl_detail_report(
         for row in report_rows:
             writer.writerow(row)
         writer.writerow(totals)
+        
+        # Add formula explanation row
+        formula_row = {col: get_formula_for_field(col, totals) for col in columns}
+        formula_row[columns[0]] = "FORMULA EXPLANATIONS:"  # Mark the first column
+        writer.writerow(formula_row)
 
     return output_path
+
+
+def get_formula_for_field(field: str, data: Dict) -> str:
+    """
+    Returns a plain English description of the formula used for the field.
+    This provides transparency about how values were derived.
+    """
+    # Define common formula patterns
+    if field.endswith('_net_total') and field.replace('_net_total', '_gross_total') in data and field.replace('_net_total', '_exclusions') in data:
+        category = field.replace('_net_total', '')
+        return f"{category} gross total minus {category} exclusions (eligible GL accounts minus excluded GL accounts)"
+    
+    elif field.endswith('_tenant_share') and 'share_percentage' in data:
+        # For tenant share calculations
+        base = field.replace('_tenant_share', '')
+        return f"{base} net total multiplied by tenant's share percentage ({data.get('share_percentage', '')})"
+    
+    elif field.endswith('_final_amount') and field.replace('_final_amount', '_subtotal') in data:
+        # For fields that have cap or other adjustments
+        base = field.replace('_final_amount', '')
+        adjustment = field.replace('_final_amount', '_adjustment')
+        if adjustment in data:
+            return f"{base} subtotal plus/minus {base} adjustments (such as overrides, caps, or other corrections)"
+        else:
+            return f"{base} subtotal amount (no adjustments applied)"
+    
+    # Admin fee calculations
+    elif field == 'admin_fee_gross':
+        return "Admin fee eligible CAM net × admin fee percentage (CAM net after all exclusions)"
+    
+    elif field == 'admin_fee_net':
+        return "Admin fee calculation on eligible CAM net (all exclusions applied upfront)"
+    
+    elif field == 'admin_fee_exclusions':
+        return "Admin fee percentage × CAM exclusions (accounts excluded from admin fee)"
+    
+    elif field == 'admin_fee_base_amount':
+        return "Admin fee eligible CAM net + capital expenses (base after all exclusions)"
+    
+    elif field == 'capital_expenses_in_admin':
+        return "Capital expenses amount included in admin fee base calculation"
+        
+    elif field == 'combined_net_total':
+        return "Combined gross total minus all exclusions (sum of CAM, RET, and other categories after exclusions)"
+        
+    elif field == 'combined_gross_total':
+        return "Sum of all category gross totals (CAM + RET + other categories before exclusions)"
+        
+    elif field == 'combined_exclusions':
+        return "Sum of all category exclusions (excluded GL accounts from CAM, RET, and other categories)"
+        
+    elif field == 'after_cap_adjustment':
+        return "Amount after applying any applicable cap limits (final amount subject to cap if cap applies, or original amount if no cap)"
+        
+    elif field == 'subtotal_after_tenant_share':
+        return "Tenant's share of expenses plus tenant's share of capital expenses (combined total the tenant is responsible for)"
+        
+    elif field == 'occupancy_adjusted_amount':
+        return "Expense subtotal multiplied by tenant's occupancy factor (adjusts for partial occupancy periods)"
+        
+    elif field == 'final_billing':
+        return "Base billing plus any manual override adjustments (final amount billed to tenant)"
+        
+    elif field == 'total_balance':
+        return "Reconciliation balance plus catchup balance (total amount due combining current year and catch-up period)"
+        
+    elif field == 'reconciliation_balance':
+        return "Reconciliation expected minus reconciliation paid (difference between expected and actual payments)"
+    
+    elif field == 'admin_fee_percentage':
+        return "Admin fee percentage from lease terms (management fee percentage applied to eligible expenses)"
+        
+    elif field == 'cam_gross_total':
+        return "Sum of all CAM expenses from GL accounts (before applying exclusions)"
+        
+    elif field == 'cam_exclusions':
+        return "Sum of all excluded CAM expenses (GL accounts specifically excluded from CAM category)"
+        
+    elif field == 'ret_gross_total':
+        return "Sum of all RET (Real Estate Tax) expenses from GL accounts (before applying exclusions)"
+        
+    elif field == 'ret_exclusions':
+        return "Sum of all excluded RET expenses (GL accounts specifically excluded from RET category)"
+    
+    # Default case: no formula description available
+    return "Direct value"
 
 
 def generate_csv_report(
@@ -2488,6 +2624,7 @@ def generate_csv_report(
 
         # Admin fee breakdown
         'admin_fee_percentage', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
+        'admin_fee_base_amount', 'capital_expenses_in_admin',
 
         # Combined totals
         'combined_gross_total', 'combined_exclusions', 'combined_net_total',
@@ -2576,6 +2713,12 @@ def generate_csv_report(
                 # Filter the row to include only the defined columns
                 filtered_row = {col: row.get(col, '') for col in dynamic_columns}
                 writer.writerow(filtered_row)
+                
+            # Add formula explanation row at the bottom
+            if report_rows:
+                formula_row = {col: get_formula_for_field(col, report_rows[-1]) for col in dynamic_columns}
+                formula_row[dynamic_columns[0]] = "FORMULA EXPLANATIONS:"  # Mark the first column
+                writer.writerow(formula_row)
 
         logger.info(f"Generated enhanced CSV report with {len(report_rows)} rows: {output_path}")
         return output_path
@@ -2670,15 +2813,37 @@ def calculate_tenant_reconciliation(
     catchup_periods = periods_dict['catchup_periods']
 
     # Enhanced filtering with detailed tracking
-    gl_filtered_data = filter_gl_accounts(gl_data, settings, recon_periods, categories)
+    gl_filtered_data = filter_gl_accounts_with_detail(gl_data, settings, recon_periods, categories, catchup_periods)
 
-    # STEP 3: Calculate CAM, TAX, admin fee - PROPERTY LEVEL
-    property_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, property_settings, categories)
+    # STEP 3: Calculate tenant share percentage first (needed for capital expenses)
+    tenant_share_percentage = calculate_tenant_share_percentage(settings, property_settings)
 
-    # STEP 4: Calculate CAM, TAX, admin fee - TENANT SPECIFIC
-    tenant_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, settings, categories)
+    # STEP 4: Calculate capital expenses first (needed for admin fee calculation)
+    property_capital_result = calculate_capital_expenses(settings, recon_year, recon_periods, tenant_share_percentage)
+    property_capital_expenses = property_capital_result['total_property_expenses']  # Use property-level total
+    tenant_capital_expenses = property_capital_result['total_capital_expenses']  # Use tenant's share
+    
+    # DEBUG: Log to verify capital expense values
+    logger.info(f"Capital Expense Debug for tenant {tenant_id}:")
+    logger.info(f"  Property Capital Expenses: {float(property_capital_expenses):.2f}")
+    logger.info(f"  Tenant Capital Expenses: {float(tenant_capital_expenses):.2f}")
+    logger.info(f"  Tenant Share Percentage: {float(tenant_share_percentage):.4f}")
+    expected_tenant_capital = property_capital_expenses * tenant_share_percentage
+    logger.info(f"  Expected Tenant Capital: {float(expected_tenant_capital):.2f}")
+    
+    # Verify the calculation is correct
+    if abs(tenant_capital_expenses - expected_tenant_capital) > Decimal('0.01'):
+        logger.warning(f"Tenant capital expenses mismatch!")
+        logger.warning(f"  Calculated: {float(tenant_capital_expenses):.2f}")
+        logger.warning(f"  Expected: {float(expected_tenant_capital):.2f}")
 
-    # STEP 5: Apply base year adjustment
+    # STEP 5: Calculate CAM, TAX, admin fee - PROPERTY LEVEL with capital expenses
+    property_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, property_settings, categories, capital_expenses_amount=property_capital_expenses)
+
+    # STEP 6: Calculate CAM, TAX, admin fee - TENANT SPECIFIC with capital expenses
+    tenant_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, settings, categories, capital_expenses_amount=tenant_capital_expenses)
+
+    # STEP 7: Apply base year adjustment
     base_year_result = calculate_base_year_adjustment(
         recon_year,
         tenant_cam_tax_admin['base_net_total'],  # This already accounts for admin fee inclusion
@@ -2690,10 +2855,10 @@ def calculate_tenant_reconciliation(
     base_year_adjustment = base_year_result['base_year_adjustment']
     after_base_amount = base_year_result['after_base_adjustment']
 
-    # STEP 6: Calculate cap-eligible amount
+    # STEP 8: Calculate cap-eligible amount
     cap_eligible_amount = determine_cap_eligible_amount(gl_filtered_data, tenant_cam_tax_admin)
 
-    # STEP 7: Apply cap limits and calculate deduction
+    # STEP 9: Apply cap limits and calculate deduction
     cap_history = load_cap_history()
 
     cap_result = calculate_cap_deduction(
@@ -2708,20 +2873,9 @@ def calculate_tenant_reconciliation(
     after_cap_amount = after_base_amount - cap_result['cap_deduction']
     logger.info(f"Amount after cap adjustment: {float(after_cap_amount):.2f}")
 
-    # STEP 8: Calculate capital expenses
-    capital_expenses_result = calculate_capital_expenses(settings, recon_year, recon_periods)
-    capital_expenses_amount = capital_expenses_result['total_capital_expenses']
-
-    # STEP 9: Calculate property-level total after all adjustments
-    property_total_after_adjustments = after_cap_amount + capital_expenses_amount
-
-    # STEP 10: Apply tenant share percentage (PRORATION STEP)
-    tenant_share_percentage = calculate_tenant_share_percentage(settings, property_settings)
+    # STEP 10: Calculate property-level total after all adjustments  
+    property_total_after_adjustments = after_cap_amount + property_capital_expenses
     tenant_share = calculate_tenant_share(after_cap_amount, tenant_share_percentage)
-
-    # Apply same proration to capital expenses if needed
-    # Note: Capital expenses might already be tenant-specific, check your business rules
-    tenant_capital_expenses = capital_expenses_amount
 
     # Calculate subtotal after tenant share calculation
     subtotal_after_tenant_share = tenant_share + tenant_capital_expenses
@@ -2850,7 +3004,7 @@ def calculate_tenant_reconciliation(
 
     # STEP 18: Get property full name from Properties.json
     property_name_mapping = load_property_name_mapping()
-    property_full_name = property_name_mapping.get(property_id, property_settings.get('name', property_id))
+    property_full_name = property_name_mapping.get(property_id.upper(), property_settings.get('name', property_id))
 
     # STEP 19: Create a detailed report row with enhanced fields
     share_method = settings.get('settings', {}).get('prorate_share_method', 'RSF')
@@ -2889,11 +3043,13 @@ def calculate_tenant_reconciliation(
         'ret_exclusions': format_currency(tenant_cam_tax_admin['ret_exclusions']),
         'ret_net_total': format_currency(tenant_cam_tax_admin['ret_net']),
 
-        # Admin fee breakdown
+        # Admin fee breakdown - showing tenant's prorated share
         'admin_fee_percentage': format_percentage(tenant_cam_tax_admin['admin_fee_percentage'] * Decimal('100'), 2),
-        'admin_fee_gross': format_currency(tenant_cam_tax_admin['admin_fee_gross']),
-        'admin_fee_exclusions': format_currency(tenant_cam_tax_admin['admin_fee_exclusions']),
-        'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net']),
+        'admin_fee_gross': format_currency(tenant_cam_tax_admin['admin_fee_gross'] * tenant_share_percentage),
+        'admin_fee_exclusions': format_currency(tenant_cam_tax_admin['admin_fee_exclusions'] * tenant_share_percentage),
+        'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net'] * tenant_share_percentage),
+        'admin_fee_base_amount': format_currency(tenant_cam_tax_admin.get('admin_fee_base_amount', Decimal('0')) * tenant_share_percentage),
+        'capital_expenses_in_admin': format_currency(tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0')) * tenant_share_percentage),
 
         # Combined totals
         'combined_gross_total': format_currency(tenant_cam_tax_admin['combined_gross_total']),
@@ -2927,7 +3083,7 @@ def calculate_tenant_reconciliation(
         'property_total_before_prorations': format_currency(property_total_after_adjustments),
 
         # Capital expenses
-        'capital_expenses_total': format_currency(capital_expenses_amount),
+        'capital_expenses_total': format_currency(property_capital_expenses),
 
         # Tenant share calculation (first proration)
         'tenant_share_amount': format_currency(tenant_share),
@@ -2986,14 +3142,14 @@ def calculate_tenant_reconciliation(
         'payment_due_date': payment_due_date.strftime('%Y-%m-%d'),
 
         # Amortization summary
-        'amortization_exists': 'true' if capital_expenses_result['has_amortization'] else 'false',
-        'amortization_total_amount': format_currency(capital_expenses_result['total_capital_expenses']),
-        'amortization_items_count': str(capital_expenses_result['expense_count']),
+        'amortization_exists': 'true' if property_capital_result['has_amortization'] else 'false',
+        'amortization_total_amount': format_currency(property_capital_result['total_property_expenses']),
+        'amortization_items_count': str(property_capital_result['expense_count']),
     }
 
     # Add all amortization items dynamically (no arbitrary limit)
-    for i, expense in enumerate(capital_expenses_result['capital_expenses'], 1):
-        tenant_share_of_expense = expense.get('prorated_amount', Decimal('0')) * tenant_share_percentage
+    for i, expense in enumerate(property_capital_result['capital_expenses'], 1):
+        tenant_share_of_expense = expense.get('tenant_annual_share', Decimal('0'))
         report_row.update({
             f'amortization_{i}_description': expense.get('description', ''),
             f'amortization_{i}_total_amount': format_currency(expense.get('total_cost', 0)),
@@ -3018,7 +3174,7 @@ def calculate_tenant_reconciliation(
         'tenant_cam_tax_admin': tenant_cam_tax_admin,
         'base_year_result': base_year_result,
         'cap_result': cap_result,
-        'capital_expenses_result': capital_expenses_result,
+        'capital_expenses_result': property_capital_result,
         'tenant_share_percentage': tenant_share_percentage,
         'tenant_share_amount': tenant_share,
         'property_total_after_adjustments': property_total_after_adjustments,
