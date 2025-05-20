@@ -566,7 +566,6 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
 \\textbf{{Description}} & \\textbf{{Amount}} \\\\
 \\midrule
 Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
-Tenant's Pro-Rata Share ({tenant_pro_rata}\\%) & \\${tenant_share} \\\\
 """
 
     # Add conditional lines
@@ -580,18 +579,18 @@ Tenant's Pro-Rata Share ({tenant_pro_rata}\\%) & \\${tenant_share} \\\\
         document += f"Admin Fee & \\${admin_fee} \\\\\n"
 
     document += f"""\\midrule
-Total Due for Year & \\${year_due} \\\\
+Total Due for Year ({tenant_pro_rata}\\% Share) & \\${year_due} \\\\
 Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
 """
 
     # Add override line if needed (right after Previously Billed)
     if has_override:
-        # Negative amounts need special handling
+        # Invert the sign for display purposes
         if override_amount.startswith('-'):
             override_value = override_amount[1:]  # Remove the negative sign
-            document += f"{override_description} & -\\${override_value} \\\\\n"
+            document += f"{override_description} & \\${override_value} \\\\\n"
         else:
-            document += f"{override_description} & \\${override_amount} \\\\\n"
+            document += f"{override_description} & -\\${override_amount} \\\\\n"
 
     document += f"""\\midrule
 {reconciliation_year} Reconciliation Amount & \\${main_period_balance} \\\\
