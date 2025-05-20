@@ -2164,7 +2164,9 @@ def generate_gl_detail_report(
     tenant_cam_tax_admin['admin_fee_gross'] = total_admin_fee
     tenant_cam_tax_admin['admin_fee_net'] = total_admin_fee
     tenant_cam_tax_admin['admin_fee_exclusions'] = admin_fee_exclusions
-    tenant_cam_tax_admin['admin_fee_base_amount'] = admin_fee_eligible_cam_net
+    # Get capital expenses from the tenant result or use 0 if not available
+    capital_expenses = tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0'))
+    tenant_cam_tax_admin['admin_fee_base_amount'] = admin_fee_eligible_cam_net + capital_expenses  # Include capital expenses in base amount
 
     # Process each GL account
     for gl_account, gl_detail in sorted(gl_line_details.items()):
@@ -2537,7 +2539,7 @@ def get_formula_for_field(field: str, data: Dict) -> str:
         return "Admin fee calculation on eligible CAM net (all exclusions applied upfront)"
     
     elif field == 'admin_fee_exclusions':
-        return "Admin fee percentage × CAM exclusions (accounts excluded from admin fee)"
+        return "Difference between admin fee on CAM net and admin fee on eligible CAM net (impact of admin-fee-specific exclusions)"
     
     elif field == 'admin_fee_base_amount':
         return "Admin fee eligible CAM net + capital expenses (base after all exclusions)"
