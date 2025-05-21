@@ -1022,10 +1022,7 @@ def generate_letters_from_results(results_dict):
     print("\nGenerating tenant letters from reconciliation results...")
     # Set default to combine PDFs automatically
     auto_combine_pdf = results_dict.get('auto_combine_pdf', True)
-    if auto_combine_pdf:
-        print("Auto PDF combining is enabled")
-    else:
-        print("Auto PDF combining is disabled")
+    print(f"Auto PDF combining is {'enabled' if auto_combine_pdf else 'disabled'} (value: {auto_combine_pdf})")
     
     # Extract property_id and recon_year early for PDF combining
     property_id = results_dict.get('property_id', '')
@@ -1264,12 +1261,48 @@ def combine_tenant_pdfs(letter_dir):
     print("\n=== Creating Combined PDF ===")
     try:
         pdf_dir = Path(letter_dir) / "PDFs"
+        print(f"PDF directory path: {pdf_dir}")
         
         # Check if PDF directory exists
         if not pdf_dir.exists():
             print(f"PDF directory not found: {pdf_dir}")
             return False
         
+        # First, try to use the standalone combine_pdfs.py module
+        try:
+            import importlib.util
+            # Find the combine_pdfs.py in the current directory or parent directories
+            combine_pdfs_path = None
+            current_dir = Path().resolve()
+            for _ in range(3):  # Check current dir and up to 2 levels up
+                if (current_dir / "combine_pdfs.py").exists():
+                    combine_pdfs_path = current_dir / "combine_pdfs.py"
+                    break
+                current_dir = current_dir.parent
+            
+            if combine_pdfs_path:
+                print(f"Found combine_pdfs.py at {combine_pdfs_path}")
+                # Import the module
+                spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
+                combine_pdfs_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(combine_pdfs_module)
+                
+                # Call the combine_pdfs function from the module with expected count
+                expected_count = total if total > 0 else None
+                print(f"Calling combine_pdfs with expected count: {expected_count}")
+                result = combine_pdfs_module.combine_pdfs(str(pdf_dir), expected_count=expected_count)
+                if result:
+                    print("Successfully combined PDFs using combine_pdfs.py module")
+                    return True
+                else:
+                    print("Failed to combine PDFs using combine_pdfs.py module, falling back to internal implementation")
+            else:
+                print("combine_pdfs.py not found, using internal implementation")
+        except Exception as e:
+            print(f"Error using combine_pdfs.py module: {str(e)}")
+            print("Falling back to internal implementation")
+            
+        # Continue with internal implementation if the module failed
         # Get a list of all PDF files
         pdf_files = list(pdf_dir.glob("*.pdf"))
         # Exclude any previously generated combined PDFs
@@ -1324,7 +1357,22 @@ def combine_tenant_pdfs(letter_dir):
                 return True
             else:
                 print(f"Error creating combined PDF: {result.stderr.decode()}")
-                return False
+                
+                # Try using PyPDF2 as a fallback
+                try:
+                    from PyPDF2 import PdfMerger
+                    print("Falling back to PyPDF2 for PDF merging...")
+                    merger = PdfMerger()
+                    for pdf_file in pdf_files:
+                        print(f"Adding {pdf_file}")
+                        merger.append(str(pdf_file))
+                    merger.write(str(output_file))
+                    merger.close()
+                    print(f"Successfully combined PDFs using PyPDF2 into {output_file}")
+                    return True
+                except Exception as pdf_error:
+                    print(f"PyPDF2 fallback failed: {pdf_error}")
+                    return False
                 
         except Exception as e:
             print(f"Error combining PDF files: {str(e)}")
@@ -1353,6 +1401,7 @@ def main():
     parser.add_argument('--verify_csv', action='store_true', help='Verify CSV structure before processing')
     parser.add_argument('--integration_mode', action='store_true', help='Add extra debugging for New Full.py integration')
     parser.add_argument('--no_combined_pdf', action='store_true', help='Skip generating combined PDF')
+    parser.add_argument('--force_combined_pdf', action='store_true', help='Force generating combined PDF at the end')
     
     args = parser.parse_args()
     
@@ -1475,7 +1524,10 @@ def main():
         # Check if auto_combine_pdf flag is set to True (default value if not specified)
         # Get no_combined_pdf from args if available
         no_combined_pdf = getattr(args, 'no_combined_pdf', False) if 'args' in locals() else False
-        if no_combined_pdf or results_dict.get('auto_combine_pdf', True) == False:
+        auto_combine_setting = results_dict.get('auto_combine_pdf', True)
+        print(f"Auto combine PDF setting in results_dict: {auto_combine_setting}")
+        
+        if no_combined_pdf or auto_combine_setting == False:
             print(f"Skipping PDF combination as requested")
         else:
             # Force PDF combination for reconciliation process
@@ -1521,14 +1573,126 @@ def main():
     # One last attempt to create combined PDF if it hasn't been done yet
     # Get no_combined_pdf from args if available
     no_combined_pdf = getattr(args, 'no_combined_pdf', False) if 'args' in locals() else False
-    if successful > 0 and property_id and recon_year and not (no_combined_pdf or results_dict.get('auto_combine_pdf', True) == False):
+    force_combined_pdf = getattr(args, 'force_combined_pdf', False) if 'args' in locals() else False
+    auto_combine_pdf = results_dict.get('auto_combine_pdf', True)  # Use True as default
+    print(f"Final attempt - auto_combine_pdf setting: {auto_combine_pdf}, force_combined_pdf: {force_combined_pdf}")
+    
+    # Add one extra, very verbose debug statement
+    print("\n=== PDF AUTO-COMBINE ENVIRONMENT CHECK ===")
+    import subprocess, shutil, sys
+    try:
+        gs_path = shutil.which('gs')
+        print(f"Ghostscript path: {gs_path}")
+        gs_version = subprocess.check_output(['gs', '--version'], text=True).strip()
+        print(f"Ghostscript version: {gs_version}")
+    except Exception as e:
+        print(f"Error checking Ghostscript: {str(e)}")
+        
+    try:
+        import PyPDF2
+        print(f"PyPDF2 version: {PyPDF2.__version__}")
+    except ImportError:
+        print("PyPDF2 not available")
+    
+    print(f"Python executable: {sys.executable}")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Letters directory: {LETTERS_DIR}")
+    if property_id and recon_year:
+        print(f"Expected PDF directory: {LETTERS_DIR / 'CAM' / property_id / recon_year / 'PDFs'}")
+        print(f"Directory exists: {(LETTERS_DIR / 'CAM' / property_id / recon_year / 'PDFs').exists()}")
+    print("=== END ENVIRONMENT CHECK ===")
+    
+    # Always try to create combined PDF if auto_combine_pdf is explicitly set to True or force_combined_pdf is set
+    if successful > 0 and property_id and recon_year and (auto_combine_pdf or force_combined_pdf or not no_combined_pdf):
         try:
             letter_dir_final = LETTERS_DIR / "CAM" / property_id / recon_year
             if letter_dir_final.exists():
+                print(f"\n=== Direct PDF Combination Attempt ===")
+                # Try the most direct method possible
+                import subprocess, os, sys
+                from pathlib import Path
+                try:
+                    # Direct subprocess call to combine_pdfs.py
+                    pdf_dir = letter_dir_final / "PDFs"
+                    print(f"PDF directory: {pdf_dir}")
+                    print(f"Directory exists: {pdf_dir.exists()}")
+                    
+                    # Find combine_pdfs.py
+                    script_dir = Path(__file__).parent.absolute()
+                    combine_pdfs_path = script_dir / 'combine_pdfs.py'
+                    if not os.path.exists(combine_pdfs_path):
+                        combine_pdfs_path = Path(os.getcwd()) / 'combine_pdfs.py'
+                    print(f"combine_pdfs.py path: {combine_pdfs_path}")
+                    print(f"File exists: {os.path.exists(combine_pdfs_path)}")
+                    
+                    # Use full path to python and combine_pdfs.py with expected tenant count
+                    expected_count = total if total > 0 else None
+                    cmd = [sys.executable, str(combine_pdfs_path), str(pdf_dir.absolute()), str(expected_count)]
+                    print(f"Running command: {' '.join(cmd)} (expected {expected_count} PDFs)")
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    
+                    # Check if it worked
+                    output_file = pdf_dir / f"All_{property_id}_{recon_year}_Letters.pdf"
+                    if output_file.exists():
+                        print(f"Success! Created {output_file}")
+                    else:
+                        print(f"Failed to create {output_file}")
+                except Exception as e:
+                    print(f"Error in direct combination: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
                 print(f"\n=== Final Attempt for Combined PDF ===\nTrying to create combined PDF for {property_id} {recon_year}")
-                combine_tenant_pdfs(letter_dir_final)
+                # Use direct subprocess call first - most reliable method
+                pdf_path = letter_dir_final / "PDFs" / f"All_{property_id}_{recon_year}_Letters.pdf"
+                print(f"Running combine_pdfs.py directly for reliability")
+                import subprocess
+                import os
+                import sys
+                from pathlib import Path
+                try:
+                    # Find combine_pdfs.py in current directory or project root
+                    script_dir = Path(__file__).parent.absolute()
+                    combine_pdfs_path = script_dir / 'combine_pdfs.py'
+                    
+                    if not os.path.exists(combine_pdfs_path):
+                        # Try looking in the current working directory
+                        cwd_path = Path.cwd() / 'combine_pdfs.py'
+                        if os.path.exists(cwd_path):
+                            combine_pdfs_path = cwd_path
+                    
+                    print(f"Using combine_pdfs.py at: {combine_pdfs_path}")
+                    
+                    # Use absolute paths for everything and expected tenant count
+                    pdf_dir_abs = letter_dir_final / "PDFs"
+                    expected_count = total if total > 0 else None
+                    result = subprocess.run([sys.executable, str(combine_pdfs_path), 
+                                           str(pdf_dir_abs.absolute()), str(expected_count)], 
+                                          check=True, capture_output=True, text=True)
+                    print(result.stdout)
+                    if pdf_path.exists():
+                        print(f"✅ Combined PDF created successfully: {pdf_path}")
+                        print(f"   Size: {pdf_path.stat().st_size / 1024:.1f} KB")
+                    else:
+                        # Fallback to internal combine_tenant_pdfs function
+                        print(f"Direct method didn't create PDF, falling back to internal method")
+                        pdf_success = combine_tenant_pdfs(letter_dir_final)
+                        if pdf_success and pdf_path.exists():
+                            print(f"✅ Fallback method successful! Combined PDF exists: {pdf_path}")
+                            print(f"   Size: {pdf_path.stat().st_size / 1024:.1f} KB")
+                        else:
+                            print(f"❌ All PDF combination methods failed")
+                except Exception as e:
+                    print(f"❌ Direct PDF combination failed: {str(e)}")
+                    # Fallback to internal combine_tenant_pdfs function
+                    print(f"Falling back to internal method...")
+                    pdf_success = combine_tenant_pdfs(letter_dir_final)
+                    if pdf_success and pdf_path.exists():
+                        print(f"✅ Fallback method successful! Combined PDF exists: {pdf_path}")
+                        print(f"   Size: {pdf_path.stat().st_size / 1024:.1f} KB")
         except Exception as e:
             print(f"Note: Could not create combined PDF in final attempt: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     return successful, total
 

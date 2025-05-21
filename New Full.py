@@ -197,10 +197,10 @@ def format_percentage(value: Union[Decimal, float, str, int], precision: int = 2
             value = value.replace('%', '')
             value = to_decimal(value)
 
-        # If value already appears to be a decimal percentage (e.g., 0.15), convert to percentage format
-        if value < Decimal('1') and value > Decimal('0'):
-            value = value * Decimal('100')
-
+        # For display purposes, value will be shown as-is (already in percentage form)
+        # No automatic conversion from decimal to percentage, as this is handled elsewhere
+        # Special case for very small values (likely already in decimal form)
+        
         formatted = format_decimal(value, precision)
         return f"{float(formatted):.{precision}f}%"
     except (ValueError, InvalidOperation):
@@ -1359,6 +1359,12 @@ def calculate_cap_limit(
     cap_percentage_str = cap_settings.get('cap_percentage', '0')
     # Make sure to handle case where cap_percentage might be a non-string/non-number
     cap_percentage = to_decimal(cap_percentage_str)
+    
+    # Check if we need to convert from percentage to decimal format
+    if cap_percentage >= Decimal('1'):
+        cap_percentage = cap_percentage / Decimal('100')
+    
+    logger.info(f"Using cap percentage: {float(cap_percentage) * 100:.4f}%")
 
     # Get cap type
     cap_type = cap_settings.get('cap_type', 'previous_year')
@@ -1367,8 +1373,27 @@ def calculate_cap_limit(
     min_increase_str = settings.get('settings', {}).get('min_increase', '')
     max_increase_str = settings.get('settings', {}).get('max_increase', '')
 
-    min_increase = to_decimal(min_increase_str) if min_increase_str else None
-    max_increase = to_decimal(max_increase_str) if max_increase_str else None
+    # Convert min increase with proper percentage handling
+    min_increase = None
+    if min_increase_str:
+        min_increase = to_decimal(min_increase_str)
+        # Check if we need to convert from percentage to decimal format
+        if min_increase >= Decimal('1'):
+            min_increase = min_increase / Decimal('100')
+            logger.info(f"Using min increase: {float(min_increase) * 100:.4f}%")
+        else:
+            logger.info(f"Using min increase (already in decimal): {float(min_increase) * 100:.4f}%")
+    
+    # Convert max increase with proper percentage handling
+    max_increase = None
+    if max_increase_str:
+        max_increase = to_decimal(max_increase_str)
+        # Check if we need to convert from percentage to decimal format
+        if max_increase >= Decimal('1'):
+            max_increase = max_increase / Decimal('100')
+            logger.info(f"Using max increase: {float(max_increase) * 100:.4f}%")
+        else:
+            logger.info(f"Using max increase (already in decimal): {float(max_increase) * 100:.4f}%")
 
     # Get stop amount
     stop_amount_str = settings.get('settings', {}).get('stop_amount', '')
@@ -1771,10 +1796,16 @@ def calculate_tenant_share_percentage(
         try:
             fixed_share = to_decimal(fixed_share_str)
 
-            # Convert from percentage (e.g., 5.138) to decimal (0.05138)
-            fixed_share = fixed_share / Decimal('100')
-            logger.info(f"Using fixed share percentage: {float(fixed_share) * 100:.4f}%")
-            return fixed_share
+            # Check if the value already appears to be a decimal (less than 1)
+            # This handles cases where the value might be entered as 0.7 instead of 70
+            if fixed_share < Decimal('1'):
+                logger.info(f"Using fixed share percentage (already in decimal format): {float(fixed_share) * 100:.4f}%")
+                return fixed_share
+            else:
+                # Convert from percentage (e.g., 5.138) to decimal (0.05138)
+                fixed_share = fixed_share / Decimal('100')
+                logger.info(f"Using fixed share percentage (converted from percentage): {float(fixed_share) * 100:.4f}%")
+                return fixed_share
         except (ValueError, decimal.InvalidOperation) as e:
             logger.error(f"Invalid fixed share percentage: {fixed_share_str}. Error: {str(e)}")
             # Fall back to RSF calculation below
@@ -2347,13 +2378,13 @@ def generate_gl_detail_report(
             'cam_exclusion_rules': cam_exclusion_rules,
             'ret_inclusion_rules': ret_inclusion_rules,
             'ret_exclusion_rules': ret_exclusion_rules,
-            'admin_fee_percentage': format_percentage(admin_fee_percentage * Decimal('100'), 2),
+            'admin_fee_percentage': format_percentage(admin_fee_percentage * Decimal('100') if admin_fee_percentage < Decimal('1') else admin_fee_percentage, 2),
             'admin_fee_exclusion_rules': admin_fee_exclusion_rules,
             'admin_fee_amount': format_currency(admin_fee_amount),
             'base_exclusion_rules': base_exclusion_rules,
             'cap_exclusion_rules': cap_exclusion_rules,
             'total_before_proration': format_currency(total_before_proration),
-            'tenant_share_percentage': format_percentage(tenant_share_percentage * Decimal('100'), 4),
+            'tenant_share_percentage': format_percentage(tenant_share_percentage * Decimal('100') if tenant_share_percentage < Decimal('1') else tenant_share_percentage, 4),
             'tenant_share_amount': format_currency(tenant_share_amount),
             'base_year_impact': format_currency(base_year_impact * -1) if base_year_impact > 0 else '$0.00',
             'cap_impact': format_currency(cap_impact * -1) if cap_impact > 0 else '$0.00',
@@ -2412,10 +2443,10 @@ def generate_gl_detail_report(
     totals['combined_exclusions'] = format_currency(totals['combined_exclusions'] * -1) if totals[
                                                                                                'combined_exclusions'] > 0 else '$0.00'
     totals['combined_net'] = format_currency(totals['combined_net'])
-    totals['admin_fee_percentage'] = format_percentage(admin_fee_percentage * Decimal('100'), 2)
+    totals['admin_fee_percentage'] = format_percentage(admin_fee_percentage * Decimal('100') if admin_fee_percentage < Decimal('1') else admin_fee_percentage, 2)
     totals['admin_fee_amount'] = format_currency(totals['admin_fee_amount'])
     totals['total_before_proration'] = format_currency(totals['total_before_proration'])
-    totals['tenant_share_percentage'] = format_percentage(tenant_share_percentage * Decimal('100'), 4)
+    totals['tenant_share_percentage'] = format_percentage(tenant_share_percentage * Decimal('100') if tenant_share_percentage < Decimal('1') else tenant_share_percentage, 4)
     totals['tenant_share_amount'] = format_currency(totals['tenant_share_amount'])
     totals['base_year_impact'] = format_currency(totals['base_year_impact'] * -1) if totals[
                                                                                          'base_year_impact'] > 0 else '$0.00'
@@ -3053,7 +3084,7 @@ def calculate_tenant_reconciliation(
 
         # Share method information
         'share_method': share_method,
-        'share_percentage': format_percentage(tenant_share_percentage * Decimal('100'), 4),
+        'share_percentage': format_percentage(tenant_share_percentage * Decimal('100') if tenant_share_percentage < Decimal('1') else tenant_share_percentage, 4),
 
         # Property gross total
         'property_gl_total': format_currency(property_cam_tax_admin['combined_gross_total']),
@@ -3069,7 +3100,7 @@ def calculate_tenant_reconciliation(
         'ret_net_total': format_currency(tenant_cam_tax_admin['ret_net']),
 
         # Admin fee breakdown - showing tenant's prorated share
-        'admin_fee_percentage': format_percentage(tenant_cam_tax_admin['admin_fee_percentage'] * Decimal('100'), 2),
+        'admin_fee_percentage': format_percentage(tenant_cam_tax_admin['admin_fee_percentage'] * Decimal('100') if tenant_cam_tax_admin['admin_fee_percentage'] < Decimal('1') else tenant_cam_tax_admin['admin_fee_percentage'], 2),
         'admin_fee_gross': format_currency(tenant_cam_tax_admin['admin_fee_gross'] * tenant_share_percentage),
         'admin_fee_exclusions': format_currency(tenant_cam_tax_admin['admin_fee_exclusions'] * tenant_share_percentage),
         'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net'] * tenant_share_percentage),
@@ -3095,8 +3126,7 @@ def calculate_tenant_reconciliation(
         'cap_reference_amount': format_currency(
             cap_result.get('cap_limit_results', {}).get('reference_amount', Decimal('0'))),
         'cap_percentage': format_percentage(
-            to_decimal(settings.get('settings', {}).get('cap_settings', {}).get('cap_percentage', '0')) * Decimal(
-                '100'),
+            to_decimal(settings.get('settings', {}).get('cap_settings', {}).get('cap_percentage', '0')),
             2),
         'cap_limit': format_currency(cap_result['cap_limit']),
         'cap_eligible_amount': format_currency(cap_result['cap_eligible_amount']),
@@ -3260,7 +3290,8 @@ def process_property_reconciliation(
         tenant_id: Optional[str] = None,
         categories: List[str] = ['cam', 'ret'],
         skip_cap_update: bool = False,
-        generate_letters: bool = True
+        generate_letters: bool = True,
+        auto_combine_pdf: bool = True
 ) -> Dict[str, Any]:
     """Process reconciliation for a property (all tenants or one tenant)."""
     logger.info(f"Starting reconciliation for property {property_id}, year {recon_year}")
@@ -3319,9 +3350,13 @@ def process_property_reconciliation(
         'gl_dir': os.path.join(GL_DETAILS_PATH, f"{property_id}_{recon_year}")  # Pass directory containing GL detail CSVs
     }
     
-    # Generate letters if requested
+    # Always generate letters unless explicitly skipped
     if generate_letters and generate_letters_from_results is not None:
         try:
+            # Add auto_combine_pdf flag to ensure combined PDF is created
+            if auto_combine_pdf:
+                results['auto_combine_pdf'] = True
+            
             # Generate letters directly from the results
             letter_success, letter_total = generate_letters_from_results(results)
             
@@ -3387,6 +3422,12 @@ def main():
         action='store_true',
         help='Skip generating tenant letters'
     )
+    parser.add_argument(
+        '--auto_combine_pdf',
+        action='store_true',
+        help='Automatically combine generated letters into a single PDF',
+        default=True
+    )
 
     args = parser.parse_args()
 
@@ -3408,7 +3449,8 @@ def main():
             args.tenant_id,
             categories,
             args.skip_cap_update,
-            generate_letters=not args.skip_letters  # Generate letters by default
+            generate_letters=not args.skip_letters,  # Generate letters by default
+            auto_combine_pdf=args.auto_combine_pdf  # Pass the auto_combine_pdf flag
         )
 
         end_time = datetime.datetime.now()
