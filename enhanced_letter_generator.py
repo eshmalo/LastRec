@@ -514,6 +514,8 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     gl_details = []
     gl_total_row = {}
     gl_detail_file = None
+    
+    # More aggressively search for GL detail files
     if gl_detail_dir:
         try:
             print(f"DEBUG [gl_breakdown]: Looking for GL detail file in {gl_detail_dir}")
@@ -773,7 +775,12 @@ Difference per Month & \\${monthly_diff} \\\\
             # Track totals for each column
             total_gl_amount_raw += gl_amount_raw
             total_tenant_gl_amount += tenant_gl_amount
-            total_tenant_admin_fee += tenant_admin_fee
+            
+            # Only add to admin fee total if not excluded
+            if not is_admin_excluded:
+                total_tenant_admin_fee += tenant_admin_fee
+            print(f"DEBUG [GL {gl_account}]: Admin fee: {tenant_admin_fee:.2f}, Running total: {total_tenant_admin_fee:.2f}, Excluded: {is_admin_excluded}")
+            
             total_cap_impact_raw += cap_impact_raw
             
             # Calculate and track the final amount for each row
@@ -838,6 +845,7 @@ Difference per Month & \\${monthly_diff} \\\\
             else:
                 # Standard row without CAP
                 if is_admin_excluded:
+                    # For admin fee excluded rows, the total should be just the tenant's share
                     latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\textit{{Excluded}} & \\${tenant_gl_share} \\\\\n"
                     print(f"DEBUG [GL {gl_account}]: Adding admin fee excluded row: '{latex_row.strip()}'")
                     document += latex_row
@@ -854,12 +862,47 @@ Difference per Month & \\${monthly_diff} \\\\
         total_cap_impact_formatted = format_currency(total_cap_impact_raw)
         total_final_amount_formatted = format_currency(total_final_amount)
         
+        # Enhanced debugging for totals
         print(f"DEBUG [GL totals]: Calculated totals from individual rows:")
         print(f"DEBUG [GL totals]:   Total GL Amount: ${total_gl_amount_formatted}")
         print(f"DEBUG [GL totals]:   Total Tenant Share: ${total_tenant_gl_share_formatted}")
         print(f"DEBUG [GL totals]:   Total Admin Fee: ${total_admin_fee_formatted}")
         print(f"DEBUG [GL totals]:   Total CAP Impact: ${total_cap_impact_formatted}")
         print(f"DEBUG [GL totals]:   Total Final Amount: ${total_final_amount_formatted}")
+        
+        # Verify the total matches the sum of tenant share and admin fee (minus cap impact if applicable)
+        expected_total = total_tenant_gl_amount + total_tenant_admin_fee
+        if has_cap:
+            expected_total -= total_cap_impact_raw
+            
+        print(f"DEBUG [GL totals]: Verification check - expected total: ${format_currency(expected_total)}")
+        print(f"DEBUG [GL totals]: Verification check - actual total: ${total_final_amount_formatted}")
+        print(f"DEBUG [GL totals]: Verification passed: {abs(expected_total - total_final_amount) < 0.01}")
+        
+        # Extract admin fee from tenant data for comparison with our calculated value
+        tenant_admin_fee_value = float(tenant_data.get("admin_fee_net", "0").strip('$').replace(',', '') or 0)
+        admin_fee_match = abs(tenant_admin_fee_value - total_tenant_admin_fee) < 0.01
+        
+        print(f"DEBUG [GL totals]: Admin fee comparison - tenant data value: ${format_currency(tenant_admin_fee_value)}")
+        print(f"DEBUG [GL totals]: Admin fee comparison - calculated value: ${format_currency(total_tenant_admin_fee)}")
+        print(f"DEBUG [GL totals]: Admin fee match: {admin_fee_match}")
+        
+        # If our calculated admin fee differs from the tenant data value, use the tenant data value
+        if not admin_fee_match:
+            print(f"DEBUG [GL totals]: WARNING - Admin fee mismatch! Using tenant data value for consistency")
+            total_tenant_admin_fee = tenant_admin_fee_value
+            total_admin_fee_formatted = format_currency(total_tenant_admin_fee)
+            
+            # Recalculate final amount
+            expected_total = total_tenant_gl_amount + total_tenant_admin_fee
+            if has_cap:
+                expected_total -= total_cap_impact_raw
+                
+            # Only update the final amount if it differs from what we calculated from the individual rows
+            if abs(expected_total - total_final_amount) > 0.01:
+                print(f"DEBUG [GL totals]: WARNING - Final amount mismatch! Recalculating with tenant data admin fee")
+                total_final_amount = expected_total
+                total_final_amount_formatted = format_currency(total_final_amount)
         
         # Add the totals row using the calculated values
         if has_cap:
@@ -989,6 +1032,36 @@ def find_most_recent_csv_report(base_dir=None, property_id=None, recon_year=None
 def generate_letters_from_results(results_dict):
     """Generate letters from reconciliation results."""
     print("\nGenerating tenant letters from reconciliation results...")
+    # Set default to combine PDFs automatically
+    auto_combine_pdf = results_dict.get('auto_combine_pdf', True)
+    if auto_combine_pdf:
+        print("Auto PDF combining is enabled")
+    else:
+        print("Auto PDF combining is disabled")
+    
+    # Extract property_id and recon_year early for PDF combining
+    property_id = results_dict.get('property_id', '')
+    recon_year = str(results_dict.get('recon_year', ''))
+    
+    # Debug information about GL detail files
+    gl_detail_reports = results_dict.get('gl_detail_reports', [])
+    gl_dir = results_dict.get('gl_dir')
+    if gl_detail_reports:
+        print(f"Found {len(gl_detail_reports)} GL detail reports for inclusion in letters")
+    if gl_dir:
+        print(f"GL directory: {gl_dir}")
+        # Check if the directory exists
+        if os.path.exists(gl_dir):
+            files_in_dir = os.listdir(gl_dir)
+            print(f"GL directory contains {len(files_in_dir)} items")
+        else:
+            print(f"GL directory doesn't exist: {gl_dir}")
+            # Create the directory
+            try:
+                os.makedirs(gl_dir, exist_ok=True)
+                print(f"Created GL directory: {gl_dir}")
+            except Exception as e:
+                print(f"Error creating GL directory: {str(e)}")
 
     # Extract the necessary paths and settings
     csv_report_path = results_dict.get('csv_report_path', '')
@@ -1198,6 +1271,84 @@ def generate_letters_from_results(results_dict):
     
     return successful, total
 
+def combine_tenant_pdfs(letter_dir):
+    """Combine all tenant PDFs into a single file for easy printing."""
+    print("\n=== Creating Combined PDF ===")
+    try:
+        pdf_dir = Path(letter_dir) / "PDFs"
+        
+        # Check if PDF directory exists
+        if not pdf_dir.exists():
+            print(f"PDF directory not found: {pdf_dir}")
+            return False
+        
+        # Get a list of all PDF files
+        pdf_files = list(pdf_dir.glob("*.pdf"))
+        # Exclude any previously generated combined PDFs
+        pdf_files = [f for f in pdf_files if "All_" not in f.name]
+        
+        if not pdf_files:
+            print("No PDF files found to combine")
+            return False
+            
+        # Make sure we have at least one PDF file
+        print(f"Found {len(pdf_files)} tenant PDFs to combine in {pdf_dir}")
+        if len(pdf_files) == 0:
+            print("No PDF files to combine")
+            return False
+        
+        # Determine property and year from directory path
+        property_id = pdf_dir.parent.parent.name
+        reconciliation_year = pdf_dir.parent.name
+        
+        # Create output filename
+        output_file = pdf_dir / f"All_{property_id}_{reconciliation_year}_Letters.pdf"
+        
+        try:
+            # Try to use Ghostscript (gs)
+            print(f"Combining {len(pdf_files)} tenant PDFs into {output_file}")
+            
+            # Change to the PDF directory
+            orig_dir = os.getcwd()
+            os.chdir(pdf_dir)
+            
+            # When running gs, we need to be careful with filenames containing special characters
+            # Instead of building a command string with all files, we'll pass files as arguments
+            gs_cmd = ["gs", "-dBATCH", "-dNOPAUSE", "-q", "-sDEVICE=pdfwrite", f"-sOutputFile={output_file.name}"]
+            gs_cmd.extend([str(f.name) for f in pdf_files])
+            
+            # Run gs command with proper argument handling
+            print(f"Running command: {' '.join(gs_cmd)}")
+            result = subprocess.run(gs_cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            
+            # Return to original directory
+            os.chdir(orig_dir)
+            
+            # Print command result
+            print(f"Command exit code: {result.returncode}")
+            if result.returncode != 0:
+                print(f"Command stderr: {result.stderr.decode() if result.stderr else 'None'}")
+                print(f"Command stdout: {result.stdout.decode() if result.stdout else 'None'}")
+            
+            if result.returncode == 0 and output_file.exists():
+                print(f"Successfully created combined PDF: {output_file}")
+                print(f"Combined PDF size: {output_file.stat().st_size / 1024:.1f} KB")
+                return True
+            else:
+                print(f"Error creating combined PDF: {result.stderr.decode()}")
+                return False
+                
+        except Exception as e:
+            print(f"Error combining PDF files: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+    except Exception as e:
+        print(f"Error in combine_tenant_pdfs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Main entry point for the script."""
     import argparse
@@ -1208,10 +1359,12 @@ def main():
     parser.add_argument('--property', type=str, help='Property ID to filter reports (e.g., WAT)')
     parser.add_argument('--year', type=str, help='Reconciliation year to filter reports (e.g., 2024)')
     parser.add_argument('--debug', action='store_true', help='Enable verbose debug output')
+    parser.add_argument('--debug_gl', action='store_true', help='Enable debugging for GL detail processing')
     parser.add_argument('--log_file', type=str, help='Path to save detailed debug logs')
     parser.add_argument('--tenant_id', type=str, help='Process only a specific tenant ID')
     parser.add_argument('--verify_csv', action='store_true', help='Verify CSV structure before processing')
     parser.add_argument('--integration_mode', action='store_true', help='Add extra debugging for New Full.py integration')
+    parser.add_argument('--no_combined_pdf', action='store_true', help='Skip generating combined PDF')
     
     args = parser.parse_args()
     
@@ -1325,11 +1478,123 @@ def main():
     print("\n=== Starting Letter Generation ===")
     successful, total = generate_letters_from_results(results_dict)
     
-    print(f"\n=== Letter Generation Complete ===")
-    print(f"Successfully generated: {successful} of {total} letters")
-    print(f"Letters saved in: {LETTERS_DIR}")
+    # Always create combined PDF if any letters were generated successfully and auto_combine_pdf is True
+    letter_dir = None
+    if successful > 0:
+        print(f"\n=== Letter Generation Complete ===\nSuccessfully generated: {successful} of {total} letters")
+        print(f"Letters saved in: {LETTERS_DIR}")
+        
+        # Check if auto_combine_pdf flag is set to True (default value if not specified)
+        # Get no_combined_pdf from args if available
+        no_combined_pdf = getattr(args, 'no_combined_pdf', False) if 'args' in locals() else False
+        if no_combined_pdf or results_dict.get('auto_combine_pdf', True) == False:
+            print(f"Skipping PDF combination as requested")
+        else:
+            # Force PDF combination for reconciliation process
+            # Create the letter directory path
+            # Determine which letter directory we just wrote to
+            # We need to find the property ID and year to locate the directory
+            try:
+                # First, try to determine the letter directory from tenant data
+                tenant_data = []
+                property_id = args.property  # Try to use from command line first
+                recon_year = args.year  # Try to use from command line first
+                
+                # If not specified on command line, extract from CSV
+                if not property_id or not recon_year:
+                    with open(csv_report_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        tenant_data = list(reader)
+                        
+                    if tenant_data:
+                        # Extract property ID and year from the first row
+                        if not property_id:
+                            property_id = tenant_data[0].get("property_id", "")
+                        if not recon_year:
+                            recon_year = tenant_data[0].get("reconciliation_year", "")
+                
+                # If we have property ID and year, proceed with combining PDFs
+                if property_id and recon_year:
+                    letter_dir = LETTERS_DIR / "CAM" / property_id / recon_year
+                    print(f"Letter directory: {letter_dir}")
+                    if letter_dir.exists():
+                        combine_tenant_pdfs(letter_dir)
+                    else:
+                        print(f"Letter directory does not exist: {letter_dir}")
+                else:
+                    print(f"Could not determine property ID ({property_id}) or reconciliation year ({recon_year})")
+            except Exception as e:
+                print(f"Error creating combined PDF: {str(e)}")
+                import traceback
+                traceback.print_exc()
+    
+    # No need to print here as we've already printed above
+    
+    # One last attempt to create combined PDF if it hasn't been done yet
+    # Get no_combined_pdf from args if available
+    no_combined_pdf = getattr(args, 'no_combined_pdf', False) if 'args' in locals() else False
+    if successful > 0 and property_id and recon_year and not (no_combined_pdf or results_dict.get('auto_combine_pdf', True) == False):
+        try:
+            letter_dir_final = LETTERS_DIR / "CAM" / property_id / recon_year
+            if letter_dir_final.exists():
+                print(f"\n=== Final Attempt for Combined PDF ===\nTrying to create combined PDF for {property_id} {recon_year}")
+                combine_tenant_pdfs(letter_dir_final)
+        except Exception as e:
+            print(f"Note: Could not create combined PDF in final attempt: {str(e)}")
     
     return successful, total
 
+def combine_latest_pdfs(property_id=None, year=None):
+    """Combine PDFs from the most recent run."""
+    try:
+        print("\n=== Combining Latest PDFs ===")
+        
+        # Find latest letter directory
+        if not property_id or not year:
+            # Find most recent directory in Letters/CAM
+            latest_dir = None
+            latest_time = 0
+            for prop_dir in (LETTERS_DIR / "CAM").glob("*"):
+                if not prop_dir.is_dir():
+                    continue
+                    
+                for year_dir in prop_dir.glob("*"):
+                    if not year_dir.is_dir():
+                        continue
+                        
+                    pdf_dir = year_dir / "PDFs"
+                    if not pdf_dir.exists() or not pdf_dir.is_dir():
+                        continue
+                        
+                    dir_time = pdf_dir.stat().st_mtime
+                    if dir_time > latest_time:
+                        latest_time = dir_time
+                        latest_dir = pdf_dir
+            
+            if latest_dir:
+                print(f"Found latest PDF directory: {latest_dir}")
+                combine_tenant_pdfs(latest_dir.parent)
+            else:
+                print("No PDF directories found")
+        else:
+            # Use specified property and year
+            letter_dir = LETTERS_DIR / "CAM" / property_id / year
+            if letter_dir.exists():
+                print(f"Using specified directory: {letter_dir}")
+                combine_tenant_pdfs(letter_dir)
+            else:
+                print(f"Specified directory does not exist: {letter_dir}")
+    except Exception as e:
+        print(f"Error combining PDFs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--combine":
+        # Just combine PDFs from the most recent run
+        prop_id = sys.argv[2] if len(sys.argv) > 2 else None
+        year = sys.argv[3] if len(sys.argv) > 3 else None
+        combine_latest_pdfs(prop_id, year)
+    else:
+        main()
