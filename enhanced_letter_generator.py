@@ -494,13 +494,25 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
         except ValueError:
             pass
     else:
-        today = datetime.datetime.now()
-        next_month = today.replace(day=1)
-        if today.month == 12:
-            next_month = next_month.replace(year=today.year + 1, month=1)
+        # This fallback follows the same logic as in New Full.py:
+        # If no effective date is provided, use January of the year following the reconciliation year
+        print(f"WARNING: No monthly_charge_effective_date found in tenant data. Using fallback logic.")
+        
+        # Get reconciliation year from tenant data
+        recon_year_str = tenant_data.get("recon_year", "")
+        if recon_year_str:
+            try:
+                recon_year = int(recon_year_str)
+                # Set to January of the next year
+                effective_date = datetime.datetime(recon_year + 1, 1, 1).strftime("%b %d, %Y")
+            except (ValueError, TypeError):
+                # If recon_year can't be parsed, use default logic
+                print(f"WARNING: Invalid recon_year: {recon_year_str}. Using current year + 1.")
+                effective_date = datetime.datetime(datetime.datetime.now().year + 1, 1, 1).strftime("%b %d, %Y")
         else:
-            next_month = next_month.replace(month=today.month + 1)
-        effective_date = next_month.strftime("%b %d, %Y")
+            # If no recon_year, use current year + 1
+            print(f"WARNING: No recon_year in tenant data. Using current year + 1.")
+            effective_date = datetime.datetime(datetime.datetime.now().year + 1, 1, 1).strftime("%b %d, %Y")
     
     # Prepare conditional lines
     has_base_year = float(tenant_data.get("base_year_adjustment", "0").strip('$').replace(',', '') or 0) > 0

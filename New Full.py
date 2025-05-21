@@ -21,6 +21,7 @@ import os
 import sys
 import json
 import csv
+import re
 import argparse
 import logging
 import datetime
@@ -3056,11 +3057,21 @@ def calculate_tenant_reconciliation(
     current_date = datetime.date.today()
     letter_generation_date = current_date
 
-    # Monthly charge effective date - typically first of next month
-    if current_date.month == 12:
-        monthly_charge_effective_date = datetime.date(current_date.year + 1, 1, 1)
+    # Monthly charge effective date - based on the last_bill parameter if provided
+    if last_bill and re.match(r'^\d{6}$', last_bill):
+        # Parse the last bill date string (YYYYMM format)
+        last_bill_year = int(last_bill[:4])
+        last_bill_month = int(last_bill[4:6])
+        
+        # Set effective date to the first day of the month after last bill
+        if last_bill_month == 12:
+            monthly_charge_effective_date = datetime.date(last_bill_year + 1, 1, 1)
+        else:
+            monthly_charge_effective_date = datetime.date(last_bill_year, last_bill_month + 1, 1)
     else:
-        monthly_charge_effective_date = datetime.date(current_date.year, current_date.month + 1, 1)
+        # If no last_bill is provided, use January of the year following the reconciliation year
+        logger.info(f"No valid last_bill parameter provided. Using January {recon_year + 1} for monthly charge effective date.")
+        monthly_charge_effective_date = datetime.date(recon_year + 1, 1, 1)
 
     # Payment due date - typically 30 days from letter generation
     payment_due_date = current_date + datetime.timedelta(days=30)
