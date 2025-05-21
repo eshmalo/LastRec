@@ -1564,9 +1564,55 @@ def main():
             print(f"Skipping PDF combination as requested")
         else:
             # Force PDF combination for reconciliation process
-            # Create the letter directory path
-            # Determine which letter directory we just wrote to
-            # We need to find the property ID and year to locate the directory
+            print("Starting automatic PDF combination process...")
+            
+            # First try using the combine_pdfs.py script directly
+            try:
+                # Import combine_pdfs module
+                import importlib.util
+                script_dir = Path(__file__).parent.absolute()
+                combine_pdfs_path = script_dir / 'combine_pdfs.py'
+                
+                if not os.path.exists(combine_pdfs_path):
+                    # Try looking in the current working directory
+                    cwd_path = Path.cwd() / 'combine_pdfs.py'
+                    if os.path.exists(cwd_path):
+                        combine_pdfs_path = cwd_path
+                
+                if os.path.exists(combine_pdfs_path):
+                    print(f"Found combine_pdfs.py at {combine_pdfs_path}")
+                    # Import the module
+                    spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
+                    combine_pdfs_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(combine_pdfs_module)
+                    
+                    # Determine which letter directory we just wrote to
+                    letter_dir = LETTERS_DIR / "CAM" / property_id / recon_year
+                    pdf_dir = letter_dir / "PDFs"
+                    
+                    if pdf_dir.exists():
+                        print(f"Found PDF directory: {pdf_dir}")
+                        # Call combine_pdfs with filtering for non-zero amounts
+                        result = combine_pdfs_module.combine_pdfs(
+                            str(pdf_dir),
+                            expected_count=total,
+                            filter_func=combine_pdfs_module.has_nonzero_amount_due,
+                            additional_output_name="NonZeroDue",
+                            output_subfolder="Combined"
+                        )
+                        
+                        if result:
+                            print(f"Successfully combined PDFs with filtering for property {property_id} year {recon_year}")
+                            return
+                
+                # Continue with original directory logic as fallback
+                # Create the letter directory path
+                # Determine which letter directory we just wrote to
+                # We need to find the property ID and year to locate the directory
+            except Exception as e:
+                print(f"Error using combine_pdfs.py module: {str(e)}")
+                
+            # Fallback to traditional method
             try:
                 # First, try to determine the letter directory from tenant data
                 tenant_data = []
@@ -1645,6 +1691,9 @@ def main():
                 import subprocess, os, sys
                 from pathlib import Path
                 try:
+                    # Import combine_pdfs module directly
+                    import importlib.util
+                    
                     # Direct subprocess call to combine_pdfs.py
                     pdf_dir = letter_dir_final / "PDFs"
                     print(f"PDF directory: {pdf_dir}")
@@ -1658,14 +1707,51 @@ def main():
                     print(f"combine_pdfs.py path: {combine_pdfs_path}")
                     print(f"File exists: {os.path.exists(combine_pdfs_path)}")
                     
-                    # Use full path to python and combine_pdfs.py with expected tenant count and non-zero filtering
+                    if os.path.exists(combine_pdfs_path):
+                        # Try to import and use the module directly first
+                        try:
+                            spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
+                            combine_pdfs_module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(combine_pdfs_module)
+                            
+                            print("Using combine_pdfs module directly")
+                            # Call combine_pdfs with filtering for non-zero amounts
+                            result = combine_pdfs_module.combine_pdfs(
+                                str(pdf_dir),
+                                expected_count=total,
+                                filter_func=combine_pdfs_module.has_nonzero_amount_due,
+                                additional_output_name="NonZeroDue",
+                                output_subfolder="Combined"
+                            )
+                            
+                            if result:
+                                print(f"Successfully combined PDFs with filtering for property {property_id} year {recon_year}")
+                                combined_dir = pdf_dir / "Combined"
+                                output_file = combined_dir / f"All_{property_id}_{recon_year}_Letters.pdf"
+                                nonzero_file = combined_dir / f"All_{property_id}_{recon_year}_Letters_NonZeroDue.pdf"
+                                
+                                if output_file.exists():
+                                    print(f"✅ Combined PDF created successfully: {output_file}")
+                                    print(f"   Size: {output_file.stat().st_size / 1024:.1f} KB")
+                                
+                                if nonzero_file.exists():
+                                    print(f"✅ Non-zero due PDF created successfully: {nonzero_file}")
+                                    print(f"   Size: {nonzero_file.stat().st_size / 1024:.1f} KB")
+                                    
+                                return
+                        except Exception as module_error:
+                            print(f"Error using module directly: {str(module_error)}")
+                    
+                    # Fallback to subprocess call
+                    print("Falling back to subprocess call")
                     expected_count = total if total > 0 else None
                     cmd = [sys.executable, str(combine_pdfs_path), str(pdf_dir.absolute()), str(expected_count), "true"]
                     print(f"Running command: {' '.join(cmd)} (expected {expected_count} PDFs with non-zero filtering)")
                     subprocess.run(cmd, check=True, capture_output=True, text=True)
                     
                     # Check if it worked
-                    output_file = pdf_dir / f"All_{property_id}_{recon_year}_Letters.pdf"
+                    combined_dir = pdf_dir / "Combined"
+                    output_file = combined_dir / f"All_{property_id}_{recon_year}_Letters.pdf"
                     if output_file.exists():
                         print(f"Success! Created {output_file}")
                     else:
