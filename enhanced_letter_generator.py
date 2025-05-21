@@ -59,9 +59,9 @@ def format_percentage(value, precision=2):
             value = float(value.strip('%'))
         else:
             value = float(value)
-        # If value is in decimal form (e.g., 0.0514 for 5.14%)
-        if value < 1:
-            value = value * 100
+            
+        # Value is already in percentage form (e.g., 5.14 for 5.14%) from the CSV
+        # No need to multiply by 100 again
         return f"{value:.{precision}f}"
     except (ValueError, TypeError):
         return "0.00"
@@ -846,7 +846,8 @@ Difference per Month & \\${monthly_diff} \\\\
                 # Standard row without CAP
                 if is_admin_excluded:
                     # For admin fee excluded rows, the total should be just the tenant's share
-                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\textit{{Excluded}} & \\${tenant_gl_share} \\\\\n"
+                    final_amount = float(tenant_gl_share.replace(',', ''))
+                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\textit{{Excluded}} & \\${format_currency(final_amount)} \\\\\n"
                     print(f"DEBUG [GL {gl_account}]: Adding admin fee excluded row: '{latex_row.strip()}'")
                     document += latex_row
                 else:
@@ -870,6 +871,18 @@ Difference per Month & \\${monthly_diff} \\\\
         print(f"DEBUG [GL totals]:   Total CAP Impact: ${total_cap_impact_formatted}")
         print(f"DEBUG [GL totals]:   Total Final Amount: ${total_final_amount_formatted}")
         
+        # Extract admin fee from tenant data for comparison with our calculated value (for debugging only)
+        tenant_admin_fee_value = float(tenant_data.get("admin_fee_net", "0").strip('$').replace(',', '') or 0)
+        admin_fee_match = abs(tenant_admin_fee_value - total_tenant_admin_fee) < 0.01
+        
+        print(f"DEBUG [GL totals]: Admin fee comparison - tenant data value: ${format_currency(tenant_admin_fee_value)}")
+        print(f"DEBUG [GL totals]: Admin fee comparison - calculated value: ${format_currency(total_tenant_admin_fee)}")
+        print(f"DEBUG [GL totals]: Admin fee match: {admin_fee_match}")
+        
+        # Verify calculation but DON'T override our calculated values
+        if not admin_fee_match:
+            print(f"DEBUG [GL totals]: NOTE - Admin fee mismatch, but using calculated value from GL breakdown")
+            
         # Verify the total matches the sum of tenant share and admin fee (minus cap impact if applicable)
         expected_total = total_tenant_gl_amount + total_tenant_admin_fee
         if has_cap:
@@ -878,31 +891,6 @@ Difference per Month & \\${monthly_diff} \\\\
         print(f"DEBUG [GL totals]: Verification check - expected total: ${format_currency(expected_total)}")
         print(f"DEBUG [GL totals]: Verification check - actual total: ${total_final_amount_formatted}")
         print(f"DEBUG [GL totals]: Verification passed: {abs(expected_total - total_final_amount) < 0.01}")
-        
-        # Extract admin fee from tenant data for comparison with our calculated value
-        tenant_admin_fee_value = float(tenant_data.get("admin_fee_net", "0").strip('$').replace(',', '') or 0)
-        admin_fee_match = abs(tenant_admin_fee_value - total_tenant_admin_fee) < 0.01
-        
-        print(f"DEBUG [GL totals]: Admin fee comparison - tenant data value: ${format_currency(tenant_admin_fee_value)}")
-        print(f"DEBUG [GL totals]: Admin fee comparison - calculated value: ${format_currency(total_tenant_admin_fee)}")
-        print(f"DEBUG [GL totals]: Admin fee match: {admin_fee_match}")
-        
-        # If our calculated admin fee differs from the tenant data value, use the tenant data value
-        if not admin_fee_match:
-            print(f"DEBUG [GL totals]: WARNING - Admin fee mismatch! Using tenant data value for consistency")
-            total_tenant_admin_fee = tenant_admin_fee_value
-            total_admin_fee_formatted = format_currency(total_tenant_admin_fee)
-            
-            # Recalculate final amount
-            expected_total = total_tenant_gl_amount + total_tenant_admin_fee
-            if has_cap:
-                expected_total -= total_cap_impact_raw
-                
-            # Only update the final amount if it differs from what we calculated from the individual rows
-            if abs(expected_total - total_final_amount) > 0.01:
-                print(f"DEBUG [GL totals]: WARNING - Final amount mismatch! Recalculating with tenant data admin fee")
-                total_final_amount = expected_total
-                total_final_amount_formatted = format_currency(total_final_amount)
         
         # Add the totals row using the calculated values
         if has_cap:
