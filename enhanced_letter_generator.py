@@ -1267,6 +1267,11 @@ def combine_tenant_pdfs(letter_dir):
         if not pdf_dir.exists():
             print(f"PDF directory not found: {pdf_dir}")
             return False
+            
+        # Create a subfolder for combined PDFs
+        combined_dir = pdf_dir / "Combined"
+        combined_dir.mkdir(exist_ok=True)
+        print(f"Created Combined subfolder: {combined_dir}")
         
         # First, try to use the standalone combine_pdfs.py module
         try:
@@ -1287,10 +1292,15 @@ def combine_tenant_pdfs(letter_dir):
                 combine_pdfs_module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(combine_pdfs_module)
                 
-                # Call the combine_pdfs function from the module with expected count
+                # Call the combine_pdfs function from the module with expected count and filtering
                 expected_count = total if total > 0 else None
-                print(f"Calling combine_pdfs with expected count: {expected_count}")
-                result = combine_pdfs_module.combine_pdfs(str(pdf_dir), expected_count=expected_count)
+                print(f"Calling combine_pdfs with expected count: {expected_count} and non-zero filtering")
+                result = combine_pdfs_module.combine_pdfs(
+                    str(pdf_dir), 
+                    expected_count=expected_count,
+                    filter_func=combine_pdfs_module.has_nonzero_amount_due,
+                    additional_output_name="NonZeroDue"
+                )
                 if result:
                     print("Successfully combined PDFs using combine_pdfs.py module")
                     return True
@@ -1322,8 +1332,31 @@ def combine_tenant_pdfs(letter_dir):
         property_id = pdf_dir.parent.parent.name
         reconciliation_year = pdf_dir.parent.name
         
-        # Create output filename
-        output_file = pdf_dir / f"All_{property_id}_{reconciliation_year}_Letters.pdf"
+        # Create output filename in the Combined subfolder
+        output_file = combined_dir / f"All_{property_id}_{reconciliation_year}_Letters.pdf"
+        
+        # Also create a non-zero amount due version
+        try:
+            # Import our combine_pdfs module to use has_nonzero_amount_due function
+            import importlib.util
+            current_dir = Path().resolve()
+            for _ in range(3):  # Check current dir and up to 2 levels up
+                combine_pdfs_path = current_dir / "combine_pdfs.py"
+                if combine_pdfs_path.exists():
+                    spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
+                    combine_pdfs_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(combine_pdfs_module)
+                    
+                    # Filter PDFs with non-zero amount due
+                    nonzero_pdfs = [f for f in pdf_files if combine_pdfs_module.has_nonzero_amount_due(f)]
+                    
+                    if nonzero_pdfs:
+                        nonzero_output = combined_dir / f"All_{property_id}_{reconciliation_year}_NonZeroDue_Letters.pdf"
+                        print(f"Will also create a filtered PDF with {len(nonzero_pdfs)} non-zero amount due tenants")
+                    break
+                current_dir = current_dir.parent
+        except Exception as e:
+            print(f"Note: Not creating non-zero amount due PDF due to error: {str(e)}")
         
         try:
             # Try to use Ghostscript (gs)
@@ -1625,10 +1658,10 @@ def main():
                     print(f"combine_pdfs.py path: {combine_pdfs_path}")
                     print(f"File exists: {os.path.exists(combine_pdfs_path)}")
                     
-                    # Use full path to python and combine_pdfs.py with expected tenant count
+                    # Use full path to python and combine_pdfs.py with expected tenant count and non-zero filtering
                     expected_count = total if total > 0 else None
-                    cmd = [sys.executable, str(combine_pdfs_path), str(pdf_dir.absolute()), str(expected_count)]
-                    print(f"Running command: {' '.join(cmd)} (expected {expected_count} PDFs)")
+                    cmd = [sys.executable, str(combine_pdfs_path), str(pdf_dir.absolute()), str(expected_count), "true"]
+                    print(f"Running command: {' '.join(cmd)} (expected {expected_count} PDFs with non-zero filtering)")
                     subprocess.run(cmd, check=True, capture_output=True, text=True)
                     
                     # Check if it worked
@@ -1662,11 +1695,11 @@ def main():
                     
                     print(f"Using combine_pdfs.py at: {combine_pdfs_path}")
                     
-                    # Use absolute paths for everything and expected tenant count
+                    # Use absolute paths for everything and expected tenant count with non-zero filtering
                     pdf_dir_abs = letter_dir_final / "PDFs"
                     expected_count = total if total > 0 else None
                     result = subprocess.run([sys.executable, str(combine_pdfs_path), 
-                                           str(pdf_dir_abs.absolute()), str(expected_count)], 
+                                           str(pdf_dir_abs.absolute()), str(expected_count), "true"], 
                                           check=True, capture_output=True, text=True)
                     print(result.stdout)
                     if pdf_path.exists():
