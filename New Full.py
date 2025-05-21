@@ -2749,7 +2749,8 @@ def generate_csv_report(
         'total_amount',
         'years',
         'annual_amount',
-        'your_share'
+        'your_share',
+        'year'
     ]
 
     # First, determine the maximum number of amortization items across all rows
@@ -3223,7 +3224,8 @@ def calculate_tenant_reconciliation(
             f'amortization_{i}_total_amount': format_currency(expense.get('total_cost', 0)),
             f'amortization_{i}_years': str(expense.get('amortization_years', 0)),
             f'amortization_{i}_annual_amount': format_currency(expense.get('annual_amount', 0)),
-            f'amortization_{i}_your_share': format_currency(tenant_share_of_expense)
+            f'amortization_{i}_your_share': format_currency(tenant_share_of_expense),
+            f'amortization_{i}_year': str(expense.get('year', ''))
         })
 
     # Return comprehensive results

@@ -576,9 +576,9 @@ Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
     if has_cap:
         document += f"Cap Reduction & -\\${cap_reduction} \\\\\n"
     if has_amortization:
-        document += f"Amortization & \\${amortization_amount} \\\\\n"
+        document += f"Total Capitalized Expenses & \\${amortization_amount} \\\\\n"
     if has_admin_fee:
-        document += f"Admin Fee & \\${admin_fee} \\\\\n"
+        document += f"Total Property Admin Fee & \\${admin_fee} \\\\\n"
         
     # Get property total with admin fee and amortization if available, otherwise calculate it
     property_total_with_additions = tenant_data.get("property_total_with_admin_fee", None)
@@ -596,8 +596,8 @@ Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
     document += f"\\midrule\nTotal Property Expenses & \\${property_total_with_additions.replace('$', '')} \\\\\n"
 
     document += f"""\\midrule
-Total Due for Year ({tenant_pro_rata}\\% Share) & \\${year_due} \\\\
-Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
+Your Share for Year ({tenant_pro_rata}\\%) & \\${year_due} \\\\
+Less Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
 """
 
     # Add override line if needed (right after Previously Billed)
@@ -615,7 +615,7 @@ Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
 
     # Add catchup line if needed
     if has_catchup:
-        document += f"{catchup_period_range} Catchup Period & \\${catchup_balance} \\\\\n"
+        document += f"Less {catchup_period_range} Payment & \\${catchup_balance} \\\\\n"
 
     document += f"""\\midrule
 \\textbf{{ADDITIONAL AMOUNT DUE}} & \\textbf{{\\${grand_total}}} \\\\
@@ -924,7 +924,7 @@ Difference per Month & \\${monthly_diff} \\\\
             document += """\\newpage
 
 \\begin{center}
-\\Large\\textbf{Amortization Details}
+\\Large\\textbf{Capitalized Expenses Details}
 \\end{center}
 
 \\begin{center}
@@ -938,6 +938,12 @@ Difference per Month & \\${monthly_diff} \\\\
             for i in range(1, amort_count + 1):
                 # Get item details
                 description = escape_latex(tenant_data.get(f"amortization_{i}_description", ""))
+                
+                # Add the year to the description if available
+                year = tenant_data.get(f"amortization_{i}_year", "")
+                if year:
+                    description = f"{description} ({year})"
+                
                 total_amount = format_currency(tenant_data.get(f"amortization_{i}_total_amount", "0"))
                 years = tenant_data.get(f"amortization_{i}_years", "")
                 annual_amount = format_currency(tenant_data.get(f"amortization_{i}_annual_amount", "0"))
@@ -964,7 +970,7 @@ Difference per Month & \\${monthly_diff} \\\\
 
 \\vspace{0.5em}
 \\begin{center}
-\\small{Note: Amortization represents your share of capital improvements}\\\\
+\\small{Note: Total Capitalized Expenses represents your share of capital improvements}\\\\
 \\small{that are allocated over multiple years rather than expensed all at once.}
 \\end{center}
 """
