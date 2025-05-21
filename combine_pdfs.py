@@ -72,7 +72,14 @@ def combine_pdfs(directory_path, expected_count=None, max_wait_seconds=60, check
         
         # Create output subfolder if it doesn't exist
         output_dir = pdf_dir / output_subfolder
-        output_dir.mkdir(exist_ok=True)
+        print(f"Attempting to create directory: {output_dir}")
+        try:
+            output_dir.mkdir(exist_ok=True, parents=True)
+            print(f"Directory created or already exists: {output_dir}")
+        except Exception as dir_error:
+            print(f"Error creating directory {output_dir}: {str(dir_error)}")
+            import traceback
+            traceback.print_exc()
         output_file = output_dir / f"{base_name}.pdf"
             
         print(f"Found {len(pdf_files)} PDF files to combine")

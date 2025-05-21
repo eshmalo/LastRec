@@ -2586,11 +2586,17 @@ def get_formula_for_field(field: str, data: Dict) -> str:
             return f"{base} subtotal amount (no adjustments applied)"
     
     # Admin fee calculations
+    elif field == 'admin_fee_raw':
+        return "Admin fee eligible CAM net × admin fee percentage (property-wide total after admin-specific exclusions but before tenant share)"
+        
+    elif field == 'property_total_with_admin_fee':
+        return "Total of CAM net + admin fee + capital expenses (full property total before tenant share)"
+        
     elif field == 'admin_fee_gross':
-        return "CAM net × admin fee percentage (before admin-specific exclusions)"
+        return "CAM net × admin fee percentage × tenant share (tenant's share before admin-specific exclusions)"
     
     elif field == 'admin_fee_net':
-        return "Admin fee eligible CAM net × admin fee percentage (after admin-specific exclusions)"
+        return "Admin fee eligible CAM net × admin fee percentage × tenant share (after admin-specific exclusions)"
     
     elif field == 'admin_fee_exclusions':
         return "Admin fee gross - admin fee net (impact of admin-fee-specific exclusions)"
@@ -2679,8 +2685,8 @@ def generate_csv_report(
         'ret_gross_total', 'ret_exclusions', 'ret_net_total',
 
         # Admin fee breakdown
-        'admin_fee_percentage', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
-        'admin_fee_base_amount', 'capital_expenses_in_admin',
+        'admin_fee_percentage', 'admin_fee_raw', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
+        'admin_fee_base_amount', 'capital_expenses_in_admin', 'property_total_with_admin_fee',
 
         # Combined totals
         'combined_gross_total', 'combined_exclusions', 'combined_net_total',
@@ -3101,12 +3107,19 @@ def calculate_tenant_reconciliation(
 
         # Admin fee breakdown - showing tenant's prorated share
         'admin_fee_percentage': format_percentage(tenant_cam_tax_admin['admin_fee_percentage'] * Decimal('100') if tenant_cam_tax_admin['admin_fee_percentage'] < Decimal('1') else tenant_cam_tax_admin['admin_fee_percentage'], 2),
+        'admin_fee_raw': format_currency(tenant_cam_tax_admin['admin_fee_net']),
         'admin_fee_gross': format_currency(tenant_cam_tax_admin['admin_fee_gross'] * tenant_share_percentage),
         'admin_fee_exclusions': format_currency(tenant_cam_tax_admin['admin_fee_exclusions'] * tenant_share_percentage),
         'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net'] * tenant_share_percentage),
         'admin_fee_base_amount': format_currency(tenant_cam_tax_admin.get('admin_fee_base_amount', Decimal('0')) * tenant_share_percentage),
         'capital_expenses_in_admin': format_currency(tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0')) * tenant_share_percentage),
 
+        # Combined totals
+        # Calculate property total with admin fee and amortization
+        'property_total_with_admin_fee': format_currency(tenant_cam_tax_admin['cam_net'] + 
+                                                      tenant_cam_tax_admin['admin_fee_net'] + 
+                                                      tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0'))),
+        
         # Combined totals
         'combined_gross_total': format_currency(tenant_cam_tax_admin['combined_gross_total']),
         'combined_exclusions': format_currency(tenant_cam_tax_admin['combined_exclusions']),
@@ -3354,8 +3367,11 @@ def process_property_reconciliation(
     if generate_letters and generate_letters_from_results is not None:
         try:
             # Add auto_combine_pdf flag to ensure combined PDF is created
+            # Debug the auto_combine_pdf value
+            print(f"auto_combine_pdf parameter: {auto_combine_pdf} (type: {type(auto_combine_pdf)})")
             if auto_combine_pdf:
                 results['auto_combine_pdf'] = True
+                print(f"Added auto_combine_pdf = {results['auto_combine_pdf']} to results dict")
             
             # Generate letters directly from the results
             letter_success, letter_total = generate_letters_from_results(results)
@@ -3455,6 +3471,17 @@ def main():
 
         end_time = datetime.datetime.now()
         elapsed_time = (end_time - start_time).total_seconds()
+        
+        # Force PDF combination after everything is done
+        try:
+            print("\n=============================================")
+            print("FORCING FINAL PDF COMBINATION")
+            print("=============================================")
+            # Use results dictionary for property_id to avoid NameError
+            from enhanced_letter_generator import ensure_combined_pdfs
+            ensure_combined_pdfs(results['property_id'].upper(), str(results['recon_year']))
+        except Exception as e:
+            print(f"Error in final PDF combination: {str(e)}")
 
         # Print summary
         print("\n" + "=" * 80)

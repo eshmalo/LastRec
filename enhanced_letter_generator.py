@@ -463,7 +463,7 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     tenant_share = format_currency(tenant_data.get("subtotal_after_tenant_share", tenant_data.get("tenant_share_amount", "0")))
     base_year_amount = format_currency(tenant_data.get("base_year_adjustment", "0"))
     cap_reduction = format_currency(tenant_data.get("cap_deduction", "0"))
-    admin_fee = format_currency(tenant_data.get("admin_fee_net", "0"))
+    admin_fee = format_currency(tenant_data.get("admin_fee_raw", "0"))
     amortization_amount = format_currency(tenant_data.get("amortization_total_amount", "0"))
     
     # Get billing details
@@ -506,7 +506,7 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     has_base_year = float(tenant_data.get("base_year_adjustment", "0").strip('$').replace(',', '') or 0) > 0
     has_cap = float(tenant_data.get("cap_deduction", "0").strip('$').replace(',', '') or 0) > 0
     has_amortization = float(tenant_data.get("amortization_total_amount", "0").strip('$').replace(',', '') or 0) > 0
-    has_admin_fee = float(tenant_data.get("admin_fee_net", "0").strip('$').replace(',', '') or 0) > 0
+    has_admin_fee = float(tenant_data.get("admin_fee_raw", "0").strip('$').replace(',', '') or 0) > 0
     has_catchup = float(tenant_data.get("catchup_balance", "0").strip('$').replace(',', '') or 0) != 0
     has_override = has_override and float(tenant_data.get("override_amount", "0").strip('$').replace(',', '') or 0) != 0
     
@@ -579,6 +579,21 @@ Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
         document += f"Amortization & \\${amortization_amount} \\\\\n"
     if has_admin_fee:
         document += f"Admin Fee & \\${admin_fee} \\\\\n"
+        
+    # Get property total with admin fee and amortization if available, otherwise calculate it
+    property_total_with_additions = tenant_data.get("property_total_with_admin_fee", None)
+    if not property_total_with_additions:
+        # Calculate the total if not available in the data
+        try:
+            property_total_val = float(property_total.replace('$', '').replace(',', '') or 0)
+            admin_fee_val = float(admin_fee.replace('$', '').replace(',', '') or 0) if has_admin_fee else 0
+            amortization_val = float(amortization_amount.replace('$', '').replace(',', '') or 0) if has_amortization else 0
+            property_total_with_additions = format_currency(property_total_val + admin_fee_val + amortization_val)
+        except (ValueError, TypeError):
+            # If calculation fails, default to a reasonable value
+            property_total_with_additions = property_total
+    
+    document += f"\\midrule\nTotal Property Expenses & \\${property_total_with_additions.replace('$', '')} \\\\\n"
 
     document += f"""\\midrule
 Total Due for Year ({tenant_pro_rata}\\% Share) & \\${year_due} \\\\
@@ -872,7 +887,7 @@ Difference per Month & \\${monthly_diff} \\\\
         print(f"DEBUG [GL totals]:   Total Final Amount: ${total_final_amount_formatted}")
         
         # Extract admin fee from tenant data for comparison with our calculated value (for debugging only)
-        tenant_admin_fee_value = float(tenant_data.get("admin_fee_net", "0").strip('$').replace(',', '') or 0)
+        tenant_admin_fee_value = float(tenant_data.get("admin_fee_raw", "0").strip('$').replace(',', '') or 0)
         admin_fee_match = abs(tenant_admin_fee_value - total_tenant_admin_fee) < 0.01
         
         print(f"DEBUG [GL totals]: Admin fee comparison - tenant data value: ${format_currency(tenant_admin_fee_value)}")
@@ -1020,9 +1035,22 @@ def find_most_recent_csv_report(base_dir=None, property_id=None, recon_year=None
 def generate_letters_from_results(results_dict):
     """Generate letters from reconciliation results."""
     print("\nGenerating tenant letters from reconciliation results...")
+    # Add diagnostics for results_dict
+    print(f"Results dictionary contains {len(results_dict)} keys")
+    print(f"Keys in results_dict: {', '.join(results_dict.keys())}")
+    
     # Set default to combine PDFs automatically
     auto_combine_pdf = results_dict.get('auto_combine_pdf', True)
-    print(f"Auto PDF combining is {'enabled' if auto_combine_pdf else 'disabled'} (value: {auto_combine_pdf})")
+    print(f"Auto PDF combining is {'enabled' if auto_combine_pdf else 'disabled'} (value: {auto_combine_pdf}, type: {type(auto_combine_pdf)})")
+    
+    # Force auto_combine_pdf to be True explicitly, just to be super safe
+    if 'auto_combine_pdf' not in results_dict:
+        print("auto_combine_pdf not found in results_dict, adding it")
+        results_dict['auto_combine_pdf'] = True
+    elif results_dict['auto_combine_pdf'] is not True:
+        print(f"auto_combine_pdf value was {results_dict['auto_combine_pdf']}, forcing to True")
+        results_dict['auto_combine_pdf'] = True
+    print(f"Final auto_combine_pdf value in results_dict: {results_dict['auto_combine_pdf']}")
     
     # Extract property_id and recon_year early for PDF combining
     property_id = results_dict.get('property_id', '')
@@ -1256,8 +1284,14 @@ def generate_letters_from_results(results_dict):
     
     return successful, total
 
-def combine_tenant_pdfs(letter_dir):
-    """Combine all tenant PDFs into a single file for easy printing."""
+def combine_tenant_pdfs(letter_dir, expected_pdf_count=None):
+    """
+    Combine all tenant PDFs into a single file for easy printing.
+    
+    Args:
+        letter_dir: Directory containing letter files
+        expected_pdf_count: Number of PDFs expected (to wait for)
+    """
     print("\n=== Creating Combined PDF ===")
     try:
         pdf_dir = Path(letter_dir) / "PDFs"
@@ -1270,8 +1304,14 @@ def combine_tenant_pdfs(letter_dir):
             
         # Create a subfolder for combined PDFs
         combined_dir = pdf_dir / "Combined"
-        combined_dir.mkdir(exist_ok=True)
-        print(f"Created Combined subfolder: {combined_dir}")
+        print(f"Attempting to create Combined directory: {combined_dir}")
+        try:
+            combined_dir.mkdir(exist_ok=True, parents=True)
+            print(f"Created or verified Combined subfolder: {combined_dir}")
+        except Exception as dir_error:
+            print(f"Error creating Combined directory {combined_dir}: {str(dir_error)}")
+            import traceback
+            traceback.print_exc()
         
         # First, try to use the standalone combine_pdfs.py module
         try:
@@ -1293,11 +1333,10 @@ def combine_tenant_pdfs(letter_dir):
                 spec.loader.exec_module(combine_pdfs_module)
                 
                 # Call the combine_pdfs function from the module with expected count and filtering
-                expected_count = total if total > 0 else None
-                print(f"Calling combine_pdfs with expected count: {expected_count} and non-zero filtering")
+                print(f"Calling combine_pdfs with expected count: {expected_pdf_count} and non-zero filtering")
                 result = combine_pdfs_module.combine_pdfs(
                     str(pdf_dir), 
-                    expected_count=expected_count,
+                    expected_count=expected_pdf_count,
                     filter_func=combine_pdfs_module.has_nonzero_amount_due,
                     additional_output_name="NonZeroDue"
                 )
@@ -1488,7 +1527,7 @@ def main():
                 # Check for crucial columns
                 required_columns = [
                     "tenant_id", "tenant_name", "property_id", "share_percentage", 
-                    "cam_net_total", "admin_fee_net", "subtotal_after_tenant_share", "tenant_share_amount"
+                    "cam_net_total", "admin_fee_raw", "subtotal_after_tenant_share", "tenant_share_amount"
                 ]
                 
                 missing_columns = [col for col in required_columns if col not in headers]
@@ -1558,7 +1597,10 @@ def main():
         # Get no_combined_pdf from args if available
         no_combined_pdf = getattr(args, 'no_combined_pdf', False) if 'args' in locals() else False
         auto_combine_setting = results_dict.get('auto_combine_pdf', True)
-        print(f"Auto combine PDF setting in results_dict: {auto_combine_setting}")
+        print(f"Auto combine PDF setting in results_dict: {auto_combine_setting} (type: {type(auto_combine_setting)})")
+        print(f"no_combined_pdf value: {no_combined_pdf} (type: {type(no_combined_pdf)})")
+        print(f"auto_combine_setting == False: {auto_combine_setting == False}")
+        print(f"Condition evaluation: {no_combined_pdf or auto_combine_setting == False}")
         
         if no_combined_pdf or auto_combine_setting == False:
             print(f"Skipping PDF combination as requested")
@@ -1637,7 +1679,7 @@ def main():
                     letter_dir = LETTERS_DIR / "CAM" / property_id / recon_year
                     print(f"Letter directory: {letter_dir}")
                     if letter_dir.exists():
-                        combine_tenant_pdfs(letter_dir)
+                        combine_tenant_pdfs(letter_dir, expected_pdf_count=None)
                     else:
                         print(f"Letter directory does not exist: {letter_dir}")
                 else:
@@ -1682,10 +1724,33 @@ def main():
     print("=== END ENVIRONMENT CHECK ===")
     
     # Always try to create combined PDF if auto_combine_pdf is explicitly set to True or force_combined_pdf is set
+    print(f"\n=== PDF Combination Decision ===")
+    print(f"successful: {successful}, property_id: {property_id}, recon_year: {recon_year}")
+    print(f"auto_combine_pdf: {auto_combine_pdf} (type: {type(auto_combine_pdf)})")
+    print(f"force_combined_pdf: {force_combined_pdf}")
+    print(f"no_combined_pdf: {no_combined_pdf}")
+    print(f"Decision condition: {successful > 0 and property_id and recon_year and (auto_combine_pdf or force_combined_pdf or not no_combined_pdf)}")
+    
     if successful > 0 and property_id and recon_year and (auto_combine_pdf or force_combined_pdf or not no_combined_pdf):
+        print("PDF combination WILL be attempted")
         try:
             letter_dir_final = LETTERS_DIR / "CAM" / property_id / recon_year
+            print(f"Final letter directory path: {letter_dir_final}")
             if letter_dir_final.exists():
+                # Make sure PDF directory exists
+                pdf_dir_path = letter_dir_final / "PDFs"
+                print(f"Checking PDF directory: {pdf_dir_path}")
+                if not pdf_dir_path.exists():
+                    print(f"Warning: PDF directory doesn't exist at {pdf_dir_path}")
+                
+                # Make sure Combined directory exists
+                combined_dir_path = pdf_dir_path / "Combined"
+                print(f"Checking Combined directory: {combined_dir_path}")
+                try:
+                    combined_dir_path.mkdir(exist_ok=True, parents=True)
+                    print(f"Combined directory created or exists at: {combined_dir_path}")
+                except Exception as dir_err:
+                    print(f"Error creating Combined directory: {str(dir_err)}")
                 print(f"\n=== Direct PDF Combination Attempt ===")
                 # Try the most direct method possible
                 import subprocess, os, sys
@@ -1794,7 +1859,7 @@ def main():
                     else:
                         # Fallback to internal combine_tenant_pdfs function
                         print(f"Direct method didn't create PDF, falling back to internal method")
-                        pdf_success = combine_tenant_pdfs(letter_dir_final)
+                        pdf_success = combine_tenant_pdfs(letter_dir_final, expected_pdf_count=total)
                         if pdf_success and pdf_path.exists():
                             print(f"✅ Fallback method successful! Combined PDF exists: {pdf_path}")
                             print(f"   Size: {pdf_path.stat().st_size / 1024:.1f} KB")
@@ -1804,7 +1869,7 @@ def main():
                     print(f"❌ Direct PDF combination failed: {str(e)}")
                     # Fallback to internal combine_tenant_pdfs function
                     print(f"Falling back to internal method...")
-                    pdf_success = combine_tenant_pdfs(letter_dir_final)
+                    pdf_success = combine_tenant_pdfs(letter_dir_final, expected_pdf_count=total)
                     if pdf_success and pdf_path.exists():
                         print(f"✅ Fallback method successful! Combined PDF exists: {pdf_path}")
                         print(f"   Size: {pdf_path.stat().st_size / 1024:.1f} KB")
@@ -1844,7 +1909,7 @@ def combine_latest_pdfs(property_id=None, year=None):
             
             if latest_dir:
                 print(f"Found latest PDF directory: {latest_dir}")
-                combine_tenant_pdfs(latest_dir.parent)
+                combine_tenant_pdfs(latest_dir.parent, expected_pdf_count=None)
             else:
                 print("No PDF directories found")
         else:
@@ -1852,13 +1917,74 @@ def combine_latest_pdfs(property_id=None, year=None):
             letter_dir = LETTERS_DIR / "CAM" / property_id / year
             if letter_dir.exists():
                 print(f"Using specified directory: {letter_dir}")
-                combine_tenant_pdfs(letter_dir)
+                combine_tenant_pdfs(letter_dir, expected_pdf_count=None)
             else:
                 print(f"Specified directory does not exist: {letter_dir}")
     except Exception as e:
         print(f"Error combining PDFs: {str(e)}")
         import traceback
         traceback.print_exc()
+
+def ensure_combined_pdfs(property_id=None, year=None):
+    """Force combination of PDFs for the specified property and year."""
+    print("\n=== FORCING PDF COMBINATION ===")
+    if not property_id or not year:
+        print("Property ID and year are required")
+        return False
+    
+    from pathlib import Path
+    letters_dir = Path(__file__).parent / "Letters"
+    letter_dir = letters_dir / "CAM" / property_id / year
+    
+    if not letter_dir.exists():
+        print(f"Letter directory does not exist: {letter_dir}")
+        return False
+        
+    pdf_dir = letter_dir / "PDFs"
+    if not pdf_dir.exists():
+        print(f"PDF directory does not exist: {pdf_dir}")
+        return False
+        
+    # Create Combined directory with full path creation
+    combined_dir = pdf_dir / "Combined"
+    print(f"Ensuring Combined directory exists: {combined_dir}")
+    combined_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Import combine_pdfs module directly
+    import importlib.util
+    from pathlib import Path
+    
+    # Find combine_pdfs.py
+    combine_pdfs_path = Path(__file__).parent / "combine_pdfs.py"
+    print(f"Looking for combine_pdfs.py at: {combine_pdfs_path}")
+    
+    if not combine_pdfs_path.exists():
+        print(f"combine_pdfs.py not found at {combine_pdfs_path}")
+        return False
+        
+    # Import module
+    print("Importing combine_pdfs module...")
+    try:
+        spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
+        combine_pdfs_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(combine_pdfs_module)
+        
+        # Call combine_pdfs directly
+        print("Calling combine_pdfs directly...")
+        result = combine_pdfs_module.combine_pdfs(
+            str(pdf_dir),
+            expected_count=None,  # Don't wait for files
+            filter_func=combine_pdfs_module.has_nonzero_amount_due,
+            additional_output_name="NonZeroDue",
+            output_subfolder="Combined"
+        )
+        
+        return result
+    except Exception as e:
+        print(f"Error in ensure_combined_pdfs: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 if __name__ == "__main__":
     import sys
@@ -1867,5 +1993,10 @@ if __name__ == "__main__":
         prop_id = sys.argv[2] if len(sys.argv) > 2 else None
         year = sys.argv[3] if len(sys.argv) > 3 else None
         combine_latest_pdfs(prop_id, year)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--force-combine":
+        # Force combine PDFs for a specific property and year
+        prop_id = sys.argv[2].upper() if len(sys.argv) > 2 else None
+        year = sys.argv[3] if len(sys.argv) > 3 else None
+        ensure_combined_pdfs(prop_id, year)
     else:
         main()
