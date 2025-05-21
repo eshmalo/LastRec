@@ -2859,7 +2859,8 @@ def calculate_tenant_reconciliation(
         recon_year: int,
         periods_dict: Dict[str, List[str]],
         categories: List[str] = ['cam', 'ret'],
-        skip_cap_update: bool = False
+        skip_cap_update: bool = False,
+        last_bill: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Calculate CAM reconciliation for a single tenant with a linear flow and detailed reporting.
@@ -3347,7 +3348,8 @@ def process_property_reconciliation(
             recon_year,
             periods,
             categories,
-            skip_cap_update
+            skip_cap_update,
+            last_bill
         )
 
         tenant_results.append(result)
