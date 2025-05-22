@@ -320,6 +320,15 @@ def escape_latex(text):
     }
     return ''.join(replacements.get(c, c) for c in str(text))
 
+def escape_amount_for_latex(amount_str):
+    """Escape commas in monetary amounts for LaTeX tabular environments."""
+    if not amount_str:
+        return ""
+    # Remove any existing $ signs and escape commas
+    amount_clean = str(amount_str).replace('$', '')
+    amount_escaped = amount_clean.replace(',', '{,}')
+    return amount_escaped
+
 def find_gl_detail_file(tenant_id, gl_detail_dir):
     """Find the MOST RECENT GL detail file for a specific tenant."""
     if not gl_detail_dir or not os.path.exists(gl_detail_dir):
@@ -579,18 +588,18 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
 \\toprule
 \\textbf{{Description}} & \\textbf{{Amount}} \\\\
 \\midrule
-Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
+Total Property CAM Expenses ({reconciliation_year}) & \\${escape_amount_for_latex(property_total)} \\\\
 """
 
     # Add conditional lines
     if has_base_year:
-        document += f"Base Year Deduction & -\\${base_year_amount} \\\\\n"
+        document += f"Base Year Deduction & -\\${escape_amount_for_latex(base_year_amount)} \\\\\n"
     if has_cap:
-        document += f"Cap Reduction & -\\${cap_reduction} \\\\\n"
+        document += f"Cap Reduction & -\\${escape_amount_for_latex(cap_reduction)} \\\\\n"
     if has_amortization:
-        document += f"Total Capitalized Expenses & \\${amortization_amount} \\\\\n"
+        document += f"Total Capitalized Expenses & \\${escape_amount_for_latex(amortization_amount)} \\\\\n"
     if has_admin_fee:
-        document += f"Total Property Admin Fee & \\${admin_fee} \\\\\n"
+        document += f"Total Property Admin Fee & \\${escape_amount_for_latex(admin_fee)} \\\\\n"
         
     # Get property total with admin fee and amortization if available, otherwise calculate it
     property_total_with_additions = tenant_data.get("property_total_with_admin_fee", None)
@@ -605,32 +614,37 @@ Total Property CAM Expenses ({reconciliation_year}) & \\${property_total} \\\\
             # If calculation fails, default to a reasonable value
             property_total_with_additions = property_total
     
-    document += f"\\midrule\nTotal Property Expenses & \\${property_total_with_additions.replace('$', '')} \\\\\n"
+    document += f"\\midrule\nTotal Property Expenses & \\${escape_amount_for_latex(property_total_with_additions)} \\\\\n"
 
     document += f"""\\midrule
-Your Share for Year ({tenant_pro_rata}\\%) & \\${year_due} \\\\
-Less Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
+Your Share for Year ({tenant_pro_rata}\\%) & \\${escape_amount_for_latex(year_due)} \\\\
+Less Previously Billed ({reconciliation_year}) & \\${escape_amount_for_latex(main_period_paid)} \\\\
 """
 
     # Add override line if needed (right after Previously Billed)
     if has_override:
-        # Invert the sign for display purposes
+        # Add "Less" prefix if the amount is negative
         if override_amount.startswith('-'):
             override_value = override_amount[1:]  # Remove the negative sign
-            document += f"{override_description} & \\${override_value} \\\\\n"
+            document += f"Less {override_description} & \\${escape_amount_for_latex(override_value)} \\\\\n"
         else:
-            document += f"{override_description} & -\\${override_amount} \\\\\n"
+            document += f"{override_description} & \\${escape_amount_for_latex(override_amount)} \\\\\n"
 
     document += f"""\\midrule
-{reconciliation_year} Reconciliation Amount & \\${main_period_balance} \\\\
+{reconciliation_year} Reconciliation Amount & \\${escape_amount_for_latex(main_period_balance)} \\\\
 """
 
     # Add catchup line if needed
     if has_catchup:
-        document += f"Less {catchup_period_range} Payment & \\${catchup_balance} \\\\\n"
+        # Add "Less" prefix if the amount is negative
+        if catchup_balance.startswith('-'):
+            catchup_value = catchup_balance[1:]  # Remove the negative sign
+            document += f"Less {catchup_period_range} Catchup Period & \\${escape_amount_for_latex(catchup_value)} \\\\\n"
+        else:
+            document += f"{catchup_period_range} Catchup Period & \\${escape_amount_for_latex(catchup_balance)} \\\\\n"
 
     document += f"""\\midrule
-\\textbf{{ADDITIONAL AMOUNT DUE}} & \\textbf{{\\${grand_total}}} \\\\
+\\textbf{{ADDITIONAL AMOUNT DUE}} & \\textbf{{\\${escape_amount_for_latex(grand_total)}}} \\\\
 \\bottomrule
 \\end{{tabular}}
 \\end{{center}}
@@ -646,9 +660,9 @@ Less Previously Billed ({reconciliation_year}) & \\${main_period_paid} \\\\
 \\begin{{center}}
 \\begin{{tabular}}{{@{{}}p{{3.2in}}r@{{}}}}
 \\toprule
-Current Monthly Charge & \\${current_monthly} \\\\
-New Monthly Charge & \\${new_monthly} \\\\
-Difference per Month & \\${monthly_diff} \\\\
+Current Monthly Charge & \\${escape_amount_for_latex(current_monthly)} \\\\
+New Monthly Charge & \\${escape_amount_for_latex(new_monthly)} \\\\
+Difference per Month & \\${escape_amount_for_latex(monthly_diff)} \\\\
 \\bottomrule
 \\end{{tabular}}
 \\end{{center}}
@@ -855,31 +869,44 @@ Difference per Month & \\${monthly_diff} \\\\
                     formatted_desc = description
                     print(f"DEBUG [GL {gl_account}]: Using standard format for description ({desc_len} chars): '{formatted_desc}'")
             
+            # Check if admin fee should be excluded (either individual GL exclusion or tenant has 0% admin fee)
+            is_admin_fee_excluded = is_admin_excluded or not has_admin_fee
+            
             # Add row based on table structure
             if has_cap:
                 if is_cap_excluded:
                     # GL accounts excluded from CAP
-                    final_amount = float(tenant_gl_share.replace(',', '')) + float(gl_admin_fee.replace(',', ''))
-                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\textit{{Excluded}} & \\${gl_admin_fee} & \\${format_currency(final_amount)} \\\\\n"
-                    print(f"DEBUG [GL {gl_account}]: Adding CAP excluded row: '{latex_row.strip()}'")
+                    if is_admin_fee_excluded:
+                        final_amount = float(tenant_gl_share.replace(',', ''))
+                        latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & \\textit{{Excluded}} & \\textit{{Excluded}} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
+                        print(f"DEBUG [GL {gl_account}]: Adding CAP excluded + admin excluded row: '{latex_row.strip()}'")
+                    else:
+                        final_amount = float(tenant_gl_share.replace(',', '')) + float(gl_admin_fee.replace(',', ''))
+                        latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & \\textit{{Excluded}} & \\${escape_amount_for_latex(gl_admin_fee)} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
+                        print(f"DEBUG [GL {gl_account}]: Adding CAP excluded row: '{latex_row.strip()}'")
                     document += latex_row
                 else:
                     # Standard GL with CAP
-                    final_amount = float(tenant_gl_share.replace(',', '')) - float(gl_cap_impact.replace(',', '')) + float(gl_admin_fee.replace(',', ''))
-                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & -\\${gl_cap_impact} & \\${gl_admin_fee} & \\${format_currency(final_amount)} \\\\\n"
-                    print(f"DEBUG [GL {gl_account}]: Adding standard CAP row: '{latex_row.strip()}'")
+                    if is_admin_fee_excluded:
+                        final_amount = float(tenant_gl_share.replace(',', '')) - float(gl_cap_impact.replace(',', ''))
+                        latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & -\\${escape_amount_for_latex(gl_cap_impact)} & \\textit{{Excluded}} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
+                        print(f"DEBUG [GL {gl_account}]: Adding standard CAP + admin excluded row: '{latex_row.strip()}'")
+                    else:
+                        final_amount = float(tenant_gl_share.replace(',', '')) - float(gl_cap_impact.replace(',', '')) + float(gl_admin_fee.replace(',', ''))
+                        latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & -\\${escape_amount_for_latex(gl_cap_impact)} & \\${escape_amount_for_latex(gl_admin_fee)} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
+                        print(f"DEBUG [GL {gl_account}]: Adding standard CAP row: '{latex_row.strip()}'")
                     document += latex_row
             else:
                 # Standard row without CAP
-                if is_admin_excluded:
+                if is_admin_fee_excluded:
                     # For admin fee excluded rows, the total should be just the tenant's share
                     final_amount = float(tenant_gl_share.replace(',', ''))
-                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\textit{{Excluded}} & \\${format_currency(final_amount)} \\\\\n"
+                    latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & \\textit{{Excluded}} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
                     print(f"DEBUG [GL {gl_account}]: Adding admin fee excluded row: '{latex_row.strip()}'")
                     document += latex_row
                 else:
                     final_amount = float(tenant_gl_share.replace(',', '')) + float(gl_admin_fee.replace(',', ''))
-                    latex_row = f"{formatted_desc} & \\${gl_amount} & \\${tenant_gl_share} & \\${gl_admin_fee} & \\${format_currency(final_amount)} \\\\\n"
+                    latex_row = f"{formatted_desc} & \\${escape_amount_for_latex(gl_amount)} & \\${escape_amount_for_latex(tenant_gl_share)} & \\${escape_amount_for_latex(gl_admin_fee)} & \\${escape_amount_for_latex(format_currency(final_amount))} \\\\\n"
                     print(f"DEBUG [GL {gl_account}]: Adding standard row: '{latex_row.strip()}'")
                     document += latex_row
         
@@ -921,9 +948,15 @@ Difference per Month & \\${monthly_diff} \\\\
         
         # Add the totals row using the calculated values
         if has_cap:
-            document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_gl_amount_formatted}}} & \\textbf{{\\${total_tenant_gl_share_formatted}}} & \\textbf{{-\\${total_cap_impact_formatted}}} & \\textbf{{\\${total_admin_fee_formatted}}} & \\textbf{{\\${total_final_amount_formatted}}} \\\\\n"
+            if has_admin_fee:
+                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${escape_amount_for_latex(total_gl_amount_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_tenant_gl_share_formatted)}}} & \\textbf{{-\\${escape_amount_for_latex(total_cap_impact_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_admin_fee_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_final_amount_formatted)}}} \\\\\n"
+            else:
+                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${escape_amount_for_latex(total_gl_amount_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_tenant_gl_share_formatted)}}} & \\textbf{{-\\${escape_amount_for_latex(total_cap_impact_formatted)}}} & \\textbf{{\\textit{{Excluded}}}} & \\textbf{{\\${escape_amount_for_latex(total_final_amount_formatted)}}} \\\\\n"
         else:
-            document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${total_gl_amount_formatted}}} & \\textbf{{\\${total_tenant_gl_share_formatted}}} & \\textbf{{\\${total_admin_fee_formatted}}} & \\textbf{{\\${total_final_amount_formatted}}} \\\\\n"
+            if has_admin_fee:
+                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${escape_amount_for_latex(total_gl_amount_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_tenant_gl_share_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_admin_fee_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_final_amount_formatted)}}} \\\\\n"
+            else:
+                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${escape_amount_for_latex(total_gl_amount_formatted)}}} & \\textbf{{\\${escape_amount_for_latex(total_tenant_gl_share_formatted)}}} & \\textbf{{\\textit{{Excluded}}}} & \\textbf{{\\${escape_amount_for_latex(total_final_amount_formatted)}}} \\\\\n"
         
         document += "\\bottomrule\n\\end{tabular}\n\\end{center}\n\n"
 
@@ -969,12 +1002,12 @@ Difference per Month & \\${monthly_diff} \\\\
                     share_pct = (tenant_share_val / annual_amount_val) * 100
                 
                 # Add row
-                document += f"{description} & \\${total_amount} & {years} & \\${annual_amount} & {format_percentage(share_pct)}\\% & \\${tenant_share} \\\\\n"
+                document += f"{description} & \\${escape_amount_for_latex(total_amount)} & {years} & \\${escape_amount_for_latex(annual_amount)} & {format_percentage(share_pct)}\\% & \\${escape_amount_for_latex(tenant_share)} \\\\\n"
                 amort_total += tenant_share_val
             
             # Add total row if multiple items
             if amort_count > 1:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & & & & & \\textbf{{\\${format_currency(amort_total)}}} \\\\\n"
+                document += f"\\midrule\n\\textbf{{TOTAL}} & & & & & \\textbf{{\\${escape_amount_for_latex(format_currency(amort_total))}}} \\\\\n"
             
             document += """\\bottomrule
 \\end{tabular}
@@ -1718,7 +1751,8 @@ def main():
     
     # Add one extra, very verbose debug statement
     print("\n=== PDF AUTO-COMBINE ENVIRONMENT CHECK ===")
-    import subprocess, shutil, sys
+    import subprocess, shutil, sys, os
+    from pathlib import Path
     try:
         gs_path = shutil.which('gs')
         print(f"Ghostscript path: {gs_path}")
@@ -1981,21 +2015,29 @@ def ensure_combined_pdfs(property_id=None, year=None):
         return False
         
     # Import module
-    print("Importing combine_pdfs module...")
+    print("Running combine_pdfs with virtual environment...")
     try:
-        spec = importlib.util.spec_from_file_location("combine_pdfs", combine_pdfs_path)
-        combine_pdfs_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(combine_pdfs_module)
+        # Use virtual environment Python if available (check both .venv and venv)
+        venv_python = Path.cwd() / ".venv" / "bin" / "python3"
+        if not venv_python.exists():
+            venv_python = Path.cwd() / "venv" / "bin" / "python3"
+        if not venv_python.exists():
+            venv_python = Path.cwd() / "venv" / "bin" / "python"
+        python_cmd = str(venv_python) if venv_python.exists() else "python3"
         
-        # Call combine_pdfs directly
-        print("Calling combine_pdfs directly...")
-        result = combine_pdfs_module.combine_pdfs(
-            str(pdf_dir),
-            expected_count=None,  # Don't wait for files
-            filter_func=combine_pdfs_module.has_nonzero_amount_due,
-            additional_output_name="NonZeroDue",
-            output_subfolder="Combined"
-        )
+        # Run combine_pdfs.py as subprocess with virtual environment
+        result = subprocess.run([
+            python_cmd, str(combine_pdfs_path), 
+            str(pdf_dir), 
+            "9",  # expected count
+            "true"  # filter for non-zero amounts
+        ], capture_output=True, text=True, cwd=Path.cwd())
+        
+        if result.returncode == 0:
+            print("PDF combination completed successfully")
+        else:
+            print(f"PDF combination failed: {result.stderr}")
+            print(f"stdout: {result.stdout}")
         
         return result
     except Exception as e:

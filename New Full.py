@@ -1863,8 +1863,8 @@ def create_override_lookup(
         property_id = override.get('property_id')
 
         if tenant_id is not None and property_id is not None:
-            # Create a unique key from tenant_id and property_id
-            key = f"{tenant_id}_{property_id}"
+            # Create a unique key from tenant_id and property_id (normalize property_id to uppercase)
+            key = f"{tenant_id}_{property_id.upper()}"
             override_lookup[key] = override
 
     logger.info(f"Created override lookup with {len(override_lookup)} entries")
@@ -1889,8 +1889,8 @@ def get_tenant_override(
     overrides = load_manual_overrides()
     override_lookup = create_override_lookup(overrides)
 
-    # Create the lookup key
-    key = f"{tenant_id}_{property_id}"
+    # Create the lookup key (normalize property_id to uppercase)
+    key = f"{tenant_id}_{property_id.upper()}"
 
     # Get the override entry
     override = override_lookup.get(key)

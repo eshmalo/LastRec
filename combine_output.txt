@@ -1,0 +1,12 @@
+
+=== Combining Latest PDFs ===
+Using specified directory: /Users/elazarshmalo/PycharmProjects/LastRec/Letters/CAM/elw/2024
+
+=== Creating Combined PDF ===
+Found combine_pdfs.py at /Users/elazarshmalo/PycharmProjects/LastRec/combine_pdfs.py
+Found 21 PDF files to combine
+Output file will be: /Users/elazarshmalo/PycharmProjects/LastRec/Letters/CAM/elw/2024/PDFs/All_elw_2024_Letters.pdf
+Running command: gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=All_elw_2024_Letters.pdf TRUE_NORTH_URGENT_CARE_LLC_1527.pdf HPTKL_INC._1346.pdf EMF_Gourmet_Market_LLC_1340.pdf Taco_Spot_LLC_1362.pdf Chip_East_Northporf_LLC_1334.pdf TRUE_NORTH_URGENT_CARE_LLC_1368.pdf Orion_Education,_LLC_1350.pdf VICTORIA_NAILS__&_SPA,_INC._1371.pdf GO_3_TOGETHER_INC._1332.pdf OM_BEAUTY,_INC._1357.pdf Yi_Bo_Yo_Inc._1352.pdf Lux_Eyecare_Studio_Optometry,_P.C._1355.pdf 3_Plaza_Drive_1348.pdf LIFT_RF_NEW_YORK,_LLC_1365.pdf BLO_ME_AWAY_EAST_NORTHPORT,_LLC_1330.pdf Borne_Holdings,_LLC_1411.pdf Class_A_Bagels,_Inc._1342.pdf GREGG_ALTIMARI_1344.pdf RBK_Childrenswear,_Inc._1338.pdf PSP_STORES,_LLC_1359.pdf D__&_S_Cleaners,_Inc._1336.pdf
+Successfully combined 21 PDFs into All_elw_2024_Letters.pdf
+File size: 253.7 KB
+Successfully combined PDFs using combine_pdfs.py module
