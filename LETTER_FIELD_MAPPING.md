@@ -32,9 +32,10 @@ The letter generator uses data from two main types of CSV reports:
 
 | Letter Field | CSV Column | CSV Report Type | Description |
 |--------------|------------|----------------|-------------|
-| property_gl_total | property_gl_total | Tenant Billing | Total property expenses |: !!!should be cam_net_total. !!!
-| share_percentage | share_percentage | Tenant Billing | Tenant's pro-rata share percentage |: !!!should be subtotal_after_tenant_share!!!
+| property_total | cam_net_total (with property_gl_total fallback) | Tenant Billing | Total property CAM expenses after exclusions |
+| share_percentage | share_percentage | Tenant Billing | Tenant's pro-rata share percentage |
 | tenant_share_amount | tenant_share_amount | Tenant Billing | Tenant's share of expenses |
+| year_due_amount | subtotal_after_tenant_share | Tenant Billing | Year due amount after applying tenant share |
 | base_year_adjustment | base_year_adjustment | Tenant Billing | Base year deduction amount |
 | cap_deduction | cap_deduction | Tenant Billing | Cap reduction amount |
 | admin_fee_net | admin_fee_net | Tenant Billing | Administrative fee amount |
@@ -86,7 +87,7 @@ The letter generator uses data from two main types of CSV reports:
 | admin_fee_exclusion_rules | admin_fee_exclusion_rules | GL Detail | Rules for admin fee exclusion |
 | cap_exclusion_rules | cap_exclusion_rules | GL Detail | Rules for cap exclusion |
 | cap_impact | cap_impact | GL Detail | Cap impact amount for this GL account |
-!!!the total line is actualy not corect in some instences. can we make the total line for the gl table to actualy sum the colomns ubove insted of looking at the csv outputs?!!!
+**IMPORTANT**: The GL table totals should be calculated by summing the individual GL account rows in the letter generator, not taken directly from CSV outputs. This ensures accuracy when individual GL accounts may be excluded or have special handling.
 
 ## Implementation Notes
 
@@ -107,8 +108,8 @@ The letter generator uses data from two main types of CSV reports:
 # Example for getting a field directly from CSV
 tenant_id = tenant_data.get("tenant_id", "")
 
-# Example for formatting a currency value
-property_total = format_currency(tenant_data.get("property_gl_total", "0"))
+# Example for formatting a currency value with fallback
+property_total = format_currency(tenant_data.get("cam_net_total", tenant_data.get("property_gl_total", "0")))
 
 # Example for checking if a section should be included
 has_base_year = float(tenant_data.get("base_year_adjustment", "0").strip('$').replace(',', '') or 0) > 0

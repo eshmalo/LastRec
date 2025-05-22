@@ -10,11 +10,19 @@ To use the LastRec system, you'll need to prepare the following CSV files in the
 
 This file should contain general ledger transaction data with the following columns:
 - `Property ID`: Property identifier
-- `PERIOD`: Accounting period in YYYYMM format
+- `PERIOD`: Accounting period in YYYYMM format  
+- `Entry Date`: Entry date (optional)
 - `Journal Ref`: Reference number
+- `Line #`: Line number
+- `Source Code`: Source code
 - `GL Account`: GL account code (with or without MR prefix)
 - `GL Description`: Description of the GL account
-- `Net Amount`: Transaction amount
+- `Account Type`: Account type (C, D, etc.)
+- `Debit`: Debit amount
+- `Credit`: Credit amount
+- `Net Amount`: Transaction amount (primary field used)
+- `Line Description`: Description of the transaction
+- Additional fields: USERID, Income Category, etc. (optional)
 
 ### 2. Properties Data (1. Properties.csv)
 
@@ -43,18 +51,24 @@ This file should contain tenant information with the following columns:
 
 This file should contain tenant CAM-specific data with the following columns:
 - `TenantID`: Tenant identifier
+- `MasterOccupantID`: Master occupant identifier (optional)
 - `TenantName`: Tenant name
 - `PropertyID`: Property identifier
+- `SuiteNumber`: Suite number (optional)
 - `TenantGLA`: Tenant gross leasable area (square footage)
-- `ProRataShare`: Pro-rata share decimal value
-- `FixedProRataPYC`: Fixed prior year charge percentage
-- `BASEYEAR`: Base year for calculations
-- `STOP`: Stop amount per square foot
-- `MININCR`: Minimum increase percentage
-- `MAXINCR`: Maximum increase percentage
+- `ProRataShare`: Pro-rata share value (used for calculation validation)
+- `FixedProRataPYC`: Fixed prior year charge percentage (optional)
+- `BASEYEAR`: Base year for calculations (optional)
+- `STOP`: Stop amount per square foot (optional)
+- `MININCR`: Minimum increase percentage (optional)
+- `MAXINCR`: Maximum increase percentage (optional)
+- `LeaseStartDate`: Lease start date
+- `LeaseEndDate`: Lease end date
+- `IncomeCategory`: Income category
 - `BillingMonth`: Billing month in YYYY-MM format
 - `TotalBilledAmount`: Total amount billed
-- `MatchedEstimate`: Monthly estimate amount
+- `MatchedEstimate`: Monthly estimate amount (optional)
+- Additional fields: EstimateVariance, etc. (optional)
 
 ### 5. GL Categories (gl_categories_original.json)
 
