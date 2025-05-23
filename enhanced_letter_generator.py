@@ -662,7 +662,6 @@ Less Previously Billed ({reconciliation_year}) & \\${escape_amount_for_latex(mai
 \\toprule
 Current Monthly Charge & \\${escape_amount_for_latex(current_monthly)} \\\\
 New Monthly Charge & \\${escape_amount_for_latex(new_monthly)} \\\\
-Difference per Month & \\${escape_amount_for_latex(monthly_diff)} \\\\
 \\bottomrule
 \\end{{tabular}}
 \\end{{center}}
@@ -973,12 +972,16 @@ Difference per Month & \\${escape_amount_for_latex(monthly_diff)} \\\\
 \\end{center}
 
 \\begin{center}
+\\adjustbox{width=\\textwidth,center}
+{\\small
 \\begin{tabular}{@{}lrrrrr@{}}
 \\toprule
-\\textbf{Description} & \\textbf{Total Amount} & \\textbf{Years} & \\textbf{Annual Amount} & \\textbf{Your Share \\%} & \\textbf{Your Share} \\\\
+\\textbf{Description} & \\textbf{Total Amount} & \\textbf{Annual Amount} & \\textbf{Years} & \\textbf{Your Share \\%} & \\textbf{Your Share} \\\\
 \\midrule
 """
             # Add amortization rows
+            total_amount_sum = 0.0
+            annual_amount_sum = 0.0
             amort_total = 0.0
             for i in range(1, amort_count + 1):
                 # Get item details
@@ -994,23 +997,29 @@ Difference per Month & \\${escape_amount_for_latex(monthly_diff)} \\\\
                 annual_amount = format_currency(tenant_data.get(f"amortization_{i}_annual_amount", "0"))
                 tenant_share = format_currency(tenant_data.get(f"amortization_{i}_your_share", "0"))
                 
-                # Calculate share percentage
+                # Calculate share percentage and track totals
+                total_amount_val = float(tenant_data.get(f"amortization_{i}_total_amount", "0").strip('$').replace(',', '') or 0)
                 annual_amount_val = float(tenant_data.get(f"amortization_{i}_annual_amount", "0").strip('$').replace(',', '') or 0)
                 tenant_share_val = float(tenant_data.get(f"amortization_{i}_your_share", "0").strip('$').replace(',', '') or 0)
                 share_pct = 0
                 if annual_amount_val > 0:
                     share_pct = (tenant_share_val / annual_amount_val) * 100
                 
-                # Add row
-                document += f"{description} & \\${escape_amount_for_latex(total_amount)} & {years} & \\${escape_amount_for_latex(annual_amount)} & {format_percentage(share_pct)}\\% & \\${escape_amount_for_latex(tenant_share)} \\\\\n"
+                # Add to totals
+                total_amount_sum += total_amount_val
+                annual_amount_sum += annual_amount_val
                 amort_total += tenant_share_val
+                
+                # Add row
+                document += f"{description} & \\${escape_amount_for_latex(total_amount)} & \\${escape_amount_for_latex(annual_amount)} & {years} & {format_percentage(share_pct)}\\% & \\${escape_amount_for_latex(tenant_share)} \\\\\n"
             
             # Add total row if multiple items
             if amort_count > 1:
-                document += f"\\midrule\n\\textbf{{TOTAL}} & & & & & \\textbf{{\\${escape_amount_for_latex(format_currency(amort_total))}}} \\\\\n"
+                document += f"\\midrule\n\\textbf{{TOTAL}} & \\textbf{{\\${escape_amount_for_latex(format_currency(total_amount_sum))}}} & \\textbf{{\\${escape_amount_for_latex(format_currency(annual_amount_sum))}}} & & & \\textbf{{\\${escape_amount_for_latex(format_currency(amort_total))}}} \\\\\n"
             
             document += """\\bottomrule
 \\end{tabular}
+}
 \\end{center}
 
 \\vspace{0.5em}
