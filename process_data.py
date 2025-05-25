@@ -675,7 +675,7 @@ def generate_settings_files():
                 "date_format": "Dates should be in MM/DD/YYYY or YYYY-MM-DD format",
                 "gl_account_format": "GL accounts can be specified with or without the MR prefix",
                 "admin_fee_in_cap_base": "Controls admin fee inclusion: \"\" (exclude from both), \"cap\" (include in cap only), \"base\" (include in base only), \"cap,base\" (include in both)",
-                "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, and amortization period in years."
+                "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, amortization period in years, and include_in_admin_fee flag (defaults to true)."
             }
         },
         "settings": {
@@ -890,7 +890,7 @@ def generate_settings_files():
                     "date_format": "Dates should be in MM/DD/YYYY or YYYY-MM-DD format",
                     "gl_account_format": "GL accounts can be specified with or without the MR prefix",
                     "admin_fee_in_cap_base": "Controls admin fee inclusion: \"\" (exclude from both), \"cap\" (include in cap only), \"base\" (include in base only), \"cap,base\" (include in both)",
-                    "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, and amortization period in years."
+                    "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, amortization period in years, and include_in_admin_fee flag (defaults to true)."
                 }
             },
             # Capital expenses that can be amortized over time
@@ -900,7 +900,8 @@ def generate_settings_files():
                     "description": "",
                     "year": "",
                     "amount": "",
-                    "amort_years": ""
+                    "amort_years": "",
+                    "include_in_admin_fee": True
                 }
             ],
             "settings": {
@@ -978,9 +979,15 @@ def generate_settings_files():
                             "description": "",
                             "year": "",
                             "amount": "",
-                            "amort_years": ""
+                            "amort_years": "",
+                            "include_in_admin_fee": True
                         }
                     ]
+                # Add include_in_admin_fee field to existing capital expenses if missing
+                elif "capital_expenses" in existing_property and existing_property["capital_expenses"]:
+                    for expense in existing_property["capital_expenses"]:
+                        if "include_in_admin_fee" not in expense:
+                            expense["include_in_admin_fee"] = True
                 updated_property_count += 1
             except Exception as e:
                 print(f"Error loading existing property settings for {property_id}: {e}")
@@ -1056,7 +1063,7 @@ def generate_settings_files():
                         "date_format": "Dates should be in MM/DD/YYYY or YYYY-MM-DD format",
                         "gl_account_format": "GL accounts can be specified with or without the MR prefix",
                         "admin_fee_in_cap_base": "Controls admin fee inclusion: \"\" (exclude from both), \"cap\" (include in cap only), \"base\" (include in base only), \"cap,base\" (include in both)",
-                        "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, and amortization period in years. For tenant-level capital expenses, the amount is applied only to this tenant."
+                        "capital_expenses": "Capital expenses are major expenditures that can be amortized over multiple years. The system calculates the amortized amount by dividing the total cost by the amortization period. Each expense needs an ID, description, year incurred, total amount, amortization period in years, and include_in_admin_fee flag (defaults to true). For tenant-level capital expenses, the amount is applied only to this tenant."
                     }
                 },
                 # Capital expenses that can be amortized over time
@@ -1066,7 +1073,8 @@ def generate_settings_files():
                         "description": "",
                         "year": "",
                         "amount": "",
-                        "amort_years": ""
+                        "amort_years": "",
+                        "include_in_admin_fee": True
                     }
                 ],
                 "settings": {
@@ -1156,9 +1164,15 @@ def generate_settings_files():
                                 "description": "",
                                 "year": "",
                                 "amount": "",
-                                "amort_years": ""
+                                "amort_years": "",
+                                "include_in_admin_fee": True
                             }
                         ]
+                    # Add include_in_admin_fee field to existing capital expenses if missing
+                    elif "capital_expenses" in existing_tenant and existing_tenant["capital_expenses"]:
+                        for expense in existing_tenant["capital_expenses"]:
+                            if "include_in_admin_fee" not in expense:
+                                expense["include_in_admin_fee"] = True
                     updated_tenant_count += 1
                 except Exception as e:
                     print(f"Error loading existing tenant settings for {tenant_id}: {e}")

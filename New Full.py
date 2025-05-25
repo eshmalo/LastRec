@@ -1596,6 +1596,8 @@ def calculate_capital_expenses(
     amortized_expenses = []
     total_capital_expense = Decimal('0')
     total_property_expense = Decimal('0')  # Track property-level total
+    total_admin_eligible_capital = Decimal('0')  # Track admin fee eligible capital expenses
+    total_admin_excluded_capital = Decimal('0')  # Track admin fee excluded capital expenses
     expense_count = 0
 
     for expense_id, expense in merged_expenses.items():
@@ -1604,6 +1606,7 @@ def calculate_capital_expenses(
         expense_amount = to_decimal(expense.get('amount', '0'), '0')
         amort_years = to_decimal(expense.get('amort_years', '1'), '1')
         description = expense.get('description', '')
+        include_in_admin_fee = expense.get('include_in_admin_fee', True)  # Default to True for backwards compatibility
 
         # Ensure amortization period is at least 1 year
         if amort_years < 1:
@@ -1669,22 +1672,34 @@ def calculate_capital_expenses(
                 'total_cost': expense_amount,
                 'amortization_years': int(amort_years),
                 'tenant_allocation_percentage': tenant_allocation_percentage,
-                'tenant_annual_share': tenant_annual_share
+                'tenant_annual_share': tenant_annual_share,
+                'include_in_admin_fee': include_in_admin_fee
             })
 
             total_capital_expense += prorated_amount  # Use prorated amount (after occupancy adjustment)
             total_property_expense += annual_amount  # Track property-level total
+            
+            # Track admin fee eligible vs excluded amounts
+            if include_in_admin_fee:
+                total_admin_eligible_capital += prorated_amount
+            else:
+                total_admin_excluded_capital += prorated_amount
+                
             expense_count += 1
 
     logger.info(
         f"Calculated capital expenses: {len(amortized_expenses)} items, total: {float(total_capital_expense):.2f}")
+    logger.info(
+        f"Admin fee eligible capital: {float(total_admin_eligible_capital):.2f}, excluded: {float(total_admin_excluded_capital):.2f}")
 
     return {
         'capital_expenses': amortized_expenses,
         'total_capital_expenses': total_capital_expense,
         'total_property_expenses': total_property_expense,  # Property-level total
+        'total_admin_eligible_capital': total_admin_eligible_capital,  # NEW: Amount included in admin fee
+        'total_admin_excluded_capital': total_admin_excluded_capital,  # NEW: Amount excluded from admin fee
         'expense_count': expense_count,
-        'has_amortization': expense_count > 0  # NEW
+        'has_amortization': expense_count > 0
     }
 
 
@@ -2596,6 +2611,21 @@ def get_formula_for_field(field: str, data: Dict) -> str:
     elif field == 'property_total_with_admin_fee':
         return "Total of CAM net + admin fee + capital expenses (full property total before tenant share)"
         
+    elif field == 'tenant_cam_net_total':
+        return "Property CAM net total as applicable to this tenant's lease terms"
+        
+    elif field == 'tenant_capital_expenses_total':
+        return "Capital expenses total applicable to this tenant based on their specific allocations"
+        
+    elif field == 'tenant_admin_fee_total':
+        return "Admin fee calculated using tenant-specific parameters (CAM + capital) × 15%"
+        
+    elif field == 'tenant_property_total_expenses':
+        return "Total property expenses from tenant's perspective (CAM + capital + admin fee with tenant-specific terms)"
+        
+    elif field == 'letter_display_property_total':
+        return "Property total for letter display (property CAM + property capital annual + tenant admin fee)"
+        
     elif field == 'admin_fee_gross':
         return "CAM net × admin fee percentage × tenant share (tenant's share before admin-specific exclusions)"
     
@@ -2691,6 +2721,10 @@ def generate_csv_report(
         # Admin fee breakdown
         'admin_fee_percentage', 'admin_fee_raw', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
         'admin_fee_base_amount', 'capital_expenses_in_admin', 'property_admin_fee_total', 'property_total_with_admin_fee',
+        
+        # Tenant-specific property totals (for letter generation)
+        'tenant_cam_net_total', 'tenant_capital_expenses_total', 'tenant_admin_fee_total', 'tenant_property_total_expenses',
+        'letter_display_property_total',
 
         # Combined totals
         'combined_gross_total', 'combined_exclusions', 'combined_net_total',
@@ -2890,11 +2924,23 @@ def calculate_tenant_reconciliation(
     property_capital_result = calculate_capital_expenses(settings, recon_year, recon_periods, tenant_share_percentage)
     property_capital_expenses = property_capital_result['total_property_expenses']  # Use property-level total
     tenant_capital_expenses = property_capital_result['total_capital_expenses']  # Use tenant's share
+    # NEW: Get admin fee eligible amounts for both property and tenant levels
+    # For property level: calculate property-level admin-eligible capital expenses but using tenant's capital expense settings
+    # This creates a property-level total as if the whole property had this tenant's specific capital expense inclusions/exclusions
+    if tenant_share_percentage > 0:
+        property_admin_eligible_capital = property_capital_result.get('total_admin_eligible_capital', Decimal('0')) / tenant_share_percentage
+    else:
+        property_admin_eligible_capital = Decimal('0')
+    
+    # For tenant level: use the calculated amount from the capital expenses result
+    tenant_admin_eligible_capital = property_capital_result.get('total_admin_eligible_capital', Decimal('0'))
     
     # DEBUG: Log to verify capital expense values
     logger.info(f"Capital Expense Debug for tenant {tenant_id}:")
     logger.info(f"  Property Capital Expenses: {float(property_capital_expenses):.2f}")
     logger.info(f"  Tenant Capital Expenses: {float(tenant_capital_expenses):.2f}")
+    logger.info(f"  Property Admin-Eligible Capital: {float(property_admin_eligible_capital):.2f}")
+    logger.info(f"  Tenant Admin-Eligible Capital: {float(tenant_admin_eligible_capital):.2f}")
     logger.info(f"  Tenant Share Percentage: {float(tenant_share_percentage):.4f}")
     expected_tenant_capital = property_capital_expenses * tenant_share_percentage
     logger.info(f"  Expected Tenant Capital: {float(expected_tenant_capital):.2f}")
@@ -2905,11 +2951,11 @@ def calculate_tenant_reconciliation(
         logger.warning(f"  Calculated: {float(tenant_capital_expenses):.2f}")
         logger.warning(f"  Expected: {float(expected_tenant_capital):.2f}")
 
-    # STEP 5: Calculate CAM, TAX, admin fee - PROPERTY LEVEL with capital expenses
-    property_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, property_settings, categories, capital_expenses_amount=property_capital_expenses)
+    # STEP 5: Calculate CAM, TAX, admin fee - PROPERTY LEVEL with admin-eligible capital expenses only
+    property_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, property_settings, categories, capital_expenses_amount=property_admin_eligible_capital)
 
-    # STEP 6: Calculate CAM, TAX, admin fee - TENANT SPECIFIC with capital expenses
-    tenant_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, settings, categories, capital_expenses_amount=tenant_capital_expenses)
+    # STEP 6: Calculate CAM, TAX, admin fee - TENANT SPECIFIC with admin-eligible capital expenses only
+    tenant_cam_tax_admin = calculate_cam_tax_admin(gl_filtered_data, settings, categories, capital_expenses_amount=tenant_admin_eligible_capital)
 
     # STEP 7: Apply base year adjustment
     base_year_result = calculate_base_year_adjustment(
@@ -3132,6 +3178,19 @@ def calculate_tenant_reconciliation(
         
         # Property-level admin fee total (for accurate reporting)
         'property_admin_fee_total': format_currency(property_cam_tax_admin['admin_fee_net']),
+
+        # Tenant-specific property totals (for letter generation) 
+        'tenant_cam_net_total': format_currency(tenant_cam_tax_admin['cam_net']),
+        'tenant_capital_expenses_total': format_currency(tenant_capital_expenses),
+        'tenant_admin_fee_total': format_currency(tenant_cam_tax_admin['admin_fee_net']),
+        'tenant_property_total_expenses': format_currency(tenant_cam_tax_admin['cam_net'] + 
+                                                        tenant_cam_tax_admin['admin_fee_net'] + 
+                                                        tenant_capital_expenses),
+        'letter_display_property_total': format_currency(tenant_cam_tax_admin['cam_net'] - 
+                                                        cap_result['cap_deduction'] -
+                                                        base_year_adjustment +
+                                                        tenant_cam_tax_admin['admin_fee_net'] + 
+                                                        property_capital_result['total_property_expenses']),
 
         # Combined totals
         # Calculate property total with admin fee and amortization

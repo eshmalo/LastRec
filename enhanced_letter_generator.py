@@ -465,15 +465,16 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     tex_path = tex_dir / f"{safe_tenant_name}_{tenant_id}.tex"
     pdf_path = pdf_dir / f"{safe_tenant_name}_{tenant_id}.pdf"
     
-    # Extract financial values - using cam_net_total instead of property_gl_total as per field mapping
-    property_total = format_currency(tenant_data.get("cam_net_total", tenant_data.get("property_gl_total", "0")))
+    # Extract financial values - use tenant-specific CAM if available, fallback to property CAM
+    property_total = format_currency(tenant_data.get("tenant_cam_net_total", tenant_data.get("cam_net_total", tenant_data.get("property_gl_total", "0"))))
     tenant_pro_rata = format_percentage(tenant_data.get("share_percentage", "0"))
     # tenant_share is calculated based on subtotal_after_tenant_share as per field mapping if available
     tenant_share = format_currency(tenant_data.get("subtotal_after_tenant_share", tenant_data.get("tenant_share_amount", "0")))
     base_year_amount = format_currency(tenant_data.get("base_year_adjustment", "0"))
     cap_reduction = format_currency(tenant_data.get("cap_deduction", "0"))
-    admin_fee = format_currency(tenant_data.get("property_admin_fee_total", tenant_data.get("admin_fee_raw", "0")))
-    amortization_amount = format_currency(tenant_data.get("amortization_total_amount", "0"))
+    # Use appropriate amounts for letter display
+    admin_fee = format_currency(tenant_data.get("tenant_admin_fee_total", tenant_data.get("admin_fee_raw", "0")))
+    amortization_amount = format_currency(tenant_data.get("capital_expenses_total", tenant_data.get("amortization_total_amount", "0")))
     
     # Get billing details
     year_due = format_currency(tenant_data.get("subtotal_after_tenant_share", "0"))
@@ -526,8 +527,8 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     # Prepare conditional lines
     has_base_year = float(tenant_data.get("base_year_adjustment", "0").strip('$').replace(',', '') or 0) > 0
     has_cap = float(tenant_data.get("cap_deduction", "0").strip('$').replace(',', '') or 0) > 0
-    has_amortization = float(tenant_data.get("amortization_total_amount", "0").strip('$').replace(',', '') or 0) > 0
-    has_admin_fee = float(tenant_data.get("property_admin_fee_total", tenant_data.get("admin_fee_raw", "0")).strip('$').replace(',', '') or 0) > 0
+    has_amortization = float(tenant_data.get("capital_expenses_total", tenant_data.get("amortization_total_amount", "0")).strip('$').replace(',', '') or 0) > 0
+    has_admin_fee = float(tenant_data.get("tenant_admin_fee_total", tenant_data.get("admin_fee_raw", "0")).strip('$').replace(',', '') or 0) > 0
     has_catchup = float(tenant_data.get("catchup_balance", "0").strip('$').replace(',', '') or 0) != 0
     has_override = has_override and float(tenant_data.get("override_amount", "0").strip('$').replace(',', '') or 0) != 0
     
@@ -601,18 +602,21 @@ Total Property CAM Expenses ({reconciliation_year}) & \\${escape_amount_for_late
     if has_admin_fee:
         document += f"Total Property Admin Fee & \\${escape_amount_for_latex(admin_fee)} \\\\\n"
         
-    # Get property total with admin fee and amortization if available, otherwise calculate it
-    property_total_with_additions = tenant_data.get("property_total_with_admin_fee", None)
+    # Get letter display property total (preferred) or fall back to tenant property total
+    property_total_with_additions = tenant_data.get("letter_display_property_total", tenant_data.get("tenant_property_total_expenses", None))
     if not property_total_with_additions:
-        # Calculate the total if not available in the data
-        try:
-            property_total_val = float(property_total.replace('$', '').replace(',', '') or 0)
-            admin_fee_val = float(admin_fee.replace('$', '').replace(',', '') or 0) if has_admin_fee else 0
-            amortization_val = float(amortization_amount.replace('$', '').replace(',', '') or 0) if has_amortization else 0
-            property_total_with_additions = format_currency(property_total_val + admin_fee_val + amortization_val)
-        except (ValueError, TypeError):
-            # If calculation fails, default to a reasonable value
-            property_total_with_additions = property_total
+        # Fallback to legacy field or calculation
+        property_total_with_additions = tenant_data.get("property_total_with_admin_fee", None)
+        if not property_total_with_additions:
+            # Calculate the total if not available in the data
+            try:
+                property_total_val = float(property_total.replace('$', '').replace(',', '') or 0)
+                admin_fee_val = float(admin_fee.replace('$', '').replace(',', '') or 0) if has_admin_fee else 0
+                amortization_val = float(amortization_amount.replace('$', '').replace(',', '') or 0) if has_amortization else 0
+                property_total_with_additions = format_currency(property_total_val + admin_fee_val + amortization_val)
+            except (ValueError, TypeError):
+                # If calculation fails, default to a reasonable value
+                property_total_with_additions = property_total
     
     document += f"\\midrule\nTotal Property Expenses & \\${escape_amount_for_latex(property_total_with_additions)} \\\\\n"
 
