@@ -2590,6 +2590,9 @@ def get_formula_for_field(field: str, data: Dict) -> str:
     elif field == 'admin_fee_raw':
         return "Admin fee eligible CAM net × admin fee percentage (property-wide total after admin-specific exclusions but before tenant share)"
         
+    elif field == 'property_admin_fee_total':
+        return "Property-level admin fee total (CAM net + capital expenses) × admin fee percentage (for accurate reporting)"
+        
     elif field == 'property_total_with_admin_fee':
         return "Total of CAM net + admin fee + capital expenses (full property total before tenant share)"
         
@@ -2687,7 +2690,7 @@ def generate_csv_report(
 
         # Admin fee breakdown
         'admin_fee_percentage', 'admin_fee_raw', 'admin_fee_gross', 'admin_fee_exclusions', 'admin_fee_net',
-        'admin_fee_base_amount', 'capital_expenses_in_admin', 'property_total_with_admin_fee',
+        'admin_fee_base_amount', 'capital_expenses_in_admin', 'property_admin_fee_total', 'property_total_with_admin_fee',
 
         # Combined totals
         'combined_gross_total', 'combined_exclusions', 'combined_net_total',
@@ -3126,6 +3129,9 @@ def calculate_tenant_reconciliation(
         'admin_fee_net': format_currency(tenant_cam_tax_admin['admin_fee_net'] * tenant_share_percentage),
         'admin_fee_base_amount': format_currency(tenant_cam_tax_admin.get('admin_fee_base_amount', Decimal('0')) * tenant_share_percentage),
         'capital_expenses_in_admin': format_currency(tenant_cam_tax_admin.get('capital_expenses_in_admin', Decimal('0')) * tenant_share_percentage),
+        
+        # Property-level admin fee total (for accurate reporting)
+        'property_admin_fee_total': format_currency(property_cam_tax_admin['admin_fee_net']),
 
         # Combined totals
         # Calculate property total with admin fee and amortization

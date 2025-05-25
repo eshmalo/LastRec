@@ -472,7 +472,7 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     tenant_share = format_currency(tenant_data.get("subtotal_after_tenant_share", tenant_data.get("tenant_share_amount", "0")))
     base_year_amount = format_currency(tenant_data.get("base_year_adjustment", "0"))
     cap_reduction = format_currency(tenant_data.get("cap_deduction", "0"))
-    admin_fee = format_currency(tenant_data.get("admin_fee_raw", "0"))
+    admin_fee = format_currency(tenant_data.get("property_admin_fee_total", tenant_data.get("admin_fee_raw", "0")))
     amortization_amount = format_currency(tenant_data.get("amortization_total_amount", "0"))
     
     # Get billing details
@@ -527,7 +527,7 @@ def generate_tenant_letter(tenant_data, gl_detail_dir=None, debug_mode=False):
     has_base_year = float(tenant_data.get("base_year_adjustment", "0").strip('$').replace(',', '') or 0) > 0
     has_cap = float(tenant_data.get("cap_deduction", "0").strip('$').replace(',', '') or 0) > 0
     has_amortization = float(tenant_data.get("amortization_total_amount", "0").strip('$').replace(',', '') or 0) > 0
-    has_admin_fee = float(tenant_data.get("admin_fee_raw", "0").strip('$').replace(',', '') or 0) > 0
+    has_admin_fee = float(tenant_data.get("property_admin_fee_total", tenant_data.get("admin_fee_raw", "0")).strip('$').replace(',', '') or 0) > 0
     has_catchup = float(tenant_data.get("catchup_balance", "0").strip('$').replace(',', '') or 0) != 0
     has_override = has_override and float(tenant_data.get("override_amount", "0").strip('$').replace(',', '') or 0) != 0
     
